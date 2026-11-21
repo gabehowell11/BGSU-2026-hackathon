@@ -1,15 +1,7 @@
 import React from "react";
 import Icon from "./Icon";
 
-export default function Sidebar({ collapsed, setCollapsed, page, setPage, courses, profileName }) {
-  const displayName = profileName || "Student";
-  const initials = displayName
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0])
-    .join("")
-    .toUpperCase();
+export default function Sidebar({ collapsed, setCollapsed, page, setPage, courses }) {
   const links = [
     ["home", "Home"],
     ["calendar", "Calendar"],
@@ -19,8 +11,8 @@ export default function Sidebar({ collapsed, setCollapsed, page, setPage, course
   return (
     <aside className={`sidebar ${collapsed ? "collapsed" : ""}`}>
       <div className="brand">
-        <div className="brand-mark">A</div>
-        {!collapsed && <span>AI Student Task Manager</span>}
+        <div className="brand-mark">D</div>
+        {!collapsed && <span>Deadline</span>}
         <button className="sidebar-toggle" type="button" onClick={() => setCollapsed(!collapsed)} aria-label="Toggle sidebar"><Icon name="chevron" /></button>
       </div>
       <nav className="primary-nav" aria-label="Primary navigation">
@@ -45,7 +37,7 @@ export default function Sidebar({ collapsed, setCollapsed, page, setPage, course
           </div>
         </>
       )}
-      <button className="profile" type="button" title="Profile"><span className="avatar">{initials}</span>{!collapsed && <><span className="profile-name">{displayName}</span><Icon name="more" /></>}</button>
+      <button className="profile" type="button" title="Profile"><span className="avatar"><Icon name="user" size={16} /></span>{!collapsed && <><span className="profile-name">Profile</span><Icon name="more" /></>}</button>
     </aside>
   );
 }

@@ -96,7 +96,6 @@ export default function AssistantPage({ setItems }) {
           <div className="chat-scroll" ref={scrollRef}>
             {messages.length === 0 && !loading && (
               <div className="chat-empty">
-                <div className="chat-empty-mark">A</div>
                 <h2>Plan with your assignment data</h2>
                 <p>Ask about deadlines, workload, or changes you want to make.</p>
                 <div className="chat-suggestions">
