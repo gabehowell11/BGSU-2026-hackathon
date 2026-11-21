@@ -1,10 +1,17 @@
 // Shared contract for stored items and for the Aivana extraction JSON schema.
 // Confidence is a number from 0 to 1. Do not ask the model for high/medium/low.
 
-const ITEM_TYPES = ["assignment", "quiz", "exam", "project", "holiday", "other"];
+const ITEM_TYPES = ["assignment", "quiz", "exam", "project", "holiday", "study", "other"];
+// Types Aivana may return from a syllabus. Study blocks are user-made only.
+const EXTRACTION_TYPES = ITEM_TYPES.filter((type) => type !== "study");
 const ITEM_STATUSES = ["todo", "in_progress", "done"];
+const ITEM_PRIORITIES = ["low", "medium", "high"];
 const ITEM_SOURCES = ["ai", "manual"];
 const USAGE_FEATURES = ["extract", "chat"];
+const CHAT_ROLES = ["user", "assistant"];
+// Types that get an 11:59 PM due time when they are created without one.
+const DEFAULT_TIME_TYPES = ["assignment", "quiz", "project"];
+const DEFAULT_DUE_TIME = "23:59";
 
 const WEEKDAYS = [
   "Monday",
@@ -28,7 +35,7 @@ const extractionItemSchema = {
   additionalProperties: false,
   properties: {
     title: { type: "string" },
-    type: { type: "string", enum: ITEM_TYPES },
+    type: { type: "string", enum: EXTRACTION_TYPES },
     due_date: isoDate,
     due_time: { type: "string" },
     weight_pct: { type: "number", minimum: 0, maximum: 100 },
@@ -57,11 +64,59 @@ const extractionResultSchema = {
   required: ["items"],
 };
 
+// Chat replies: the text to show plus proposed changes the user must confirm.
+const CHAT_ACTION_OPS = ["create", "update", "delete"];
+
+const chatActionFieldsSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    title: { type: "string" },
+    type: { type: "string", enum: ITEM_TYPES },
+    due_date: isoDate,
+    due_time: { type: "string" },
+    course_id: { type: "integer" },
+    status: { type: "string", enum: ITEM_STATUSES },
+    priority: { type: "string", enum: ITEM_PRIORITIES },
+    notes: { type: "string" },
+    estimated_minutes: { type: "integer", minimum: 0 },
+    weight_pct: { type: "number", minimum: 0, maximum: 100 },
+  },
+};
+
+const chatResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    reply: { type: "string" },
+    actions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          op: { type: "string", enum: CHAT_ACTION_OPS },
+          item_id: { type: "integer" },
+          summary: { type: "string" },
+          fields: chatActionFieldsSchema,
+        },
+        required: ["op", "summary"],
+      },
+    },
+  },
+  required: ["reply", "actions"],
+};
+
 module.exports = {
   ITEM_TYPES,
+  EXTRACTION_TYPES,
   ITEM_STATUSES,
+  ITEM_PRIORITIES,
   ITEM_SOURCES,
   USAGE_FEATURES,
+  CHAT_ROLES,
+  DEFAULT_TIME_TYPES,
+  DEFAULT_DUE_TIME,
   WEEKDAYS,
   CONFIDENCE_MIN,
   CONFIDENCE_MAX,
@@ -69,4 +124,6 @@ module.exports = {
   CHAT_HISTORY_LIMIT,
   extractionItemSchema,
   extractionResultSchema,
+  CHAT_ACTION_OPS,
+  chatResponseSchema,
 };

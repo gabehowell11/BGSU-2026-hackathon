@@ -4,9 +4,13 @@ const { DatabaseSync } = require("node:sqlite");
 const {
   ITEM_TYPES,
   ITEM_STATUSES,
+  ITEM_PRIORITIES,
   ITEM_SOURCES,
   USAGE_FEATURES,
+  CHAT_ROLES,
   CHAT_HISTORY_LIMIT,
+  DEFAULT_TIME_TYPES,
+  DEFAULT_DUE_TIME,
 } = require("../shared/schemas");
 const {
   blankToNull,
@@ -16,13 +20,20 @@ const {
   optionalNumber,
   optionalInteger,
   oneOf,
+  optionalChoice,
   optionalWeekday,
+  optionalTime,
+  optionalColor,
   optionalConfidence,
+  localDate,
+  addDays,
 } = require("./validation");
 
 // Bump this when the CREATE TABLE statements change. An older local file is
-// dropped and recreated. CREATE TABLE IF NOT EXISTS does not add new columns.
-const SCHEMA_VERSION = 1;
+// dropped and recreated (run `npm run seed` again afterwards).
+// CREATE TABLE IF NOT EXISTS does not add new columns.
+const SCHEMA_VERSION = 2;
+const DEFAULT_COURSE_COLOR = "#3157c8";
 
 let database;
 
@@ -60,12 +71,21 @@ function openDatabase(userDataDirectory) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT NOT NULL,
       type TEXT NOT NULL DEFAULT 'assignment'
-        CHECK (type IN ('assignment', 'quiz', 'exam', 'project', 'holiday', 'other')),
+        CHECK (type IN ('assignment', 'quiz', 'exam', 'project', 'holiday', 'study', 'other')),
       due_date TEXT,
       due_time TEXT,
       weight_pct REAL,
       status TEXT NOT NULL DEFAULT 'todo'
         CHECK (status IN ('todo', 'in_progress', 'done')),
+      priority TEXT
+        CHECK (priority IS NULL OR priority IN ('low', 'medium', 'high')),
+      notes TEXT,
+      estimated_minutes INTEGER
+        CHECK (estimated_minutes IS NULL OR estimated_minutes >= 0),
+      color TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       term_id INTEGER NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
       course_id INTEGER REFERENCES courses(id) ON DELETE CASCADE,
       source TEXT NOT NULL DEFAULT 'manual'
@@ -92,7 +112,7 @@ function openDatabase(userDataDirectory) {
 
     CREATE TABLE IF NOT EXISTS chat_messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      role TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
       content TEXT NOT NULL,
       timestamp TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -101,6 +121,7 @@ function openDatabase(userDataDirectory) {
     CREATE INDEX IF NOT EXISTS idx_items_term_id ON items(term_id);
     CREATE INDEX IF NOT EXISTS idx_items_course_id ON items(course_id);
     CREATE INDEX IF NOT EXISTS idx_items_due_date ON items(due_date);
+    CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
     CREATE INDEX IF NOT EXISTS idx_usage_log_timestamp ON usage_log(timestamp);
     CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages(timestamp);
   `);
@@ -210,6 +231,22 @@ function getTerm(id) {
   `).get(id);
 }
 
+// Returns the term that contains the date, else the latest-starting term, else undefined.
+function getCurrentTerm(date = localDate()) {
+  return database.prepare(`
+    SELECT id, name, start_date, end_date
+    FROM terms
+    WHERE start_date <= ? AND end_date >= ?
+    ORDER BY start_date DESC, id DESC
+    LIMIT 1
+  `).get(date, date) || database.prepare(`
+    SELECT id, name, start_date, end_date
+    FROM terms
+    ORDER BY start_date DESC, id DESC
+    LIMIT 1
+  `).get();
+}
+
 // Returns every course, or only the courses in one term when a term id is given.
 function listCourses(termId) {
   if (termId) {
@@ -239,7 +276,7 @@ function createCourse(course) {
   `).run(
     requireText(course?.code, "course code"),
     requireText(course?.name, "course name"),
-    blankToNull(course?.color) || "#3157c8",
+    optionalColor(course?.color, "Course color") || DEFAULT_COURSE_COLOR,
     course.termId,
   );
 
@@ -258,7 +295,7 @@ function updateCourse(id, course) {
   `).run(
     requireText(course?.code, "course code"),
     requireText(course?.name, "course name"),
-    blankToNull(course?.color) || "#3157c8",
+    optionalColor(course?.color, "Course color") || DEFAULT_COURSE_COLOR,
     course.termId,
     id,
   );
@@ -288,8 +325,11 @@ const ITEM_SELECT = `
          items.weight_pct, items.status, items.term_id, items.course_id, items.source,
          items.date_text, items.week, items.weekday, items.source_quote,
          items.confidence, items.source_file, items.ai_due_date, items.verified_at,
+         items.priority, items.notes, items.estimated_minutes, items.color,
+         items.completed_at, items.created_at, items.updated_at,
          courses.code AS course_code, courses.name AS course_name,
-         courses.color AS course_color
+         courses.color AS course_color,
+         COALESCE(items.color, courses.color) AS display_color
   FROM items
   LEFT JOIN courses ON courses.id = items.course_id
 `;
@@ -302,15 +342,45 @@ const ITEM_ORDER = `
     items.id DESC
 `;
 
-// Returns items, optionally limited to one term, with undated rows last.
-function listItems(filter = {}) {
+// Turns an item filter into SQL clauses. Every key is optional:
+// termId, courseId, status, type, priority, verified (true/false), search (title or notes).
+function itemFilterClauses(filter = {}) {
   const clauses = [];
   const params = [];
   if (filter?.termId) {
     clauses.push("items.term_id = ?");
     params.push(filter.termId);
   }
+  if (filter?.courseId) {
+    clauses.push("items.course_id = ?");
+    params.push(filter.courseId);
+  }
+  if (filter?.status) {
+    clauses.push("items.status = ?");
+    params.push(oneOf(filter.status, ITEM_STATUSES, "Status"));
+  }
+  if (filter?.type) {
+    clauses.push("items.type = ?");
+    params.push(oneOf(filter.type, ITEM_TYPES, "Type"));
+  }
+  if (filter?.priority) {
+    clauses.push("items.priority = ?");
+    params.push(oneOf(filter.priority, ITEM_PRIORITIES, "Priority"));
+  }
+  if (filter?.verified === true) clauses.push("items.verified_at IS NOT NULL");
+  if (filter?.verified === false) clauses.push("items.verified_at IS NULL");
+  const search = blankToNull(filter?.search);
+  if (search) {
+    const pattern = `%${search.replace(/[\\%_]/g, "\\$&")}%`;
+    clauses.push("(items.title LIKE ? ESCAPE '\\' OR items.notes LIKE ? ESCAPE '\\')");
+    params.push(pattern, pattern);
+  }
+  return { clauses, params };
+}
 
+// Returns items matching the optional filter, with undated rows last.
+function listItems(filter = {}) {
+  const { clauses, params } = itemFilterClauses(filter);
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   return database.prepare(`
     ${ITEM_SELECT}
@@ -319,21 +389,74 @@ function listItems(filter = {}) {
   `).all(...params);
 }
 
-// Returns items whose due date falls inside the inclusive YYYY-MM-DD range.
-function listItemsInRange(from, to) {
+// Returns items whose due date falls inside the inclusive YYYY-MM-DD range,
+// narrowed by the same optional filter as listItems.
+function listItemsInRange(from, to, filter = {}) {
   const start = requireDate(from, "Range start");
   const end = requireDate(to, "Range end");
   if (start > end) {
     throw new Error("The range end must be on or after the start.");
   }
 
+  const { clauses, params } = itemFilterClauses(filter);
+  const extra = clauses.length ? `AND ${clauses.join(" AND ")}` : "";
   return database.prepare(`
     ${ITEM_SELECT}
     WHERE items.due_date IS NOT NULL
       AND items.due_date >= ?
       AND items.due_date <= ?
+      ${extra}
     ${ITEM_ORDER}
-  `).all(start, end);
+  `).all(start, end, ...params);
+}
+
+// Returns the home page summary for a local YYYY-MM-DD date (default today).
+// Only verified items count, so unconfirmed AI guesses never show here.
+function getSummary(today = localDate()) {
+  const date = requireDate(today, "Today");
+  const weekEnd = addDays(date, 7);
+  const verified = `${ITEM_SELECT} WHERE items.verified_at IS NOT NULL`;
+  const work = "items.type NOT IN ('holiday', 'study')";
+
+  const dueToday = database.prepare(`
+    ${verified} AND items.due_date = ? ${ITEM_ORDER}
+  `).all(date);
+  const upcoming = database.prepare(`
+    ${verified} AND items.due_date > ? AND items.due_date <= ? ${ITEM_ORDER}
+  `).all(date, weekEnd);
+  const overdue = database.prepare(`
+    ${verified} AND items.due_date < ? AND items.status <> 'done' AND ${work} ${ITEM_ORDER}
+  `).all(date);
+  const recentlyCompleted = database.prepare(`
+    ${verified} AND items.status = 'done'
+    ORDER BY items.completed_at DESC, items.id DESC
+    LIMIT 5
+  `).all();
+  const needsReview = database.prepare(`
+    SELECT COUNT(*) AS count FROM items WHERE verified_at IS NULL
+  `).get().count;
+
+  return {
+    today: date,
+    weekEnd,
+    dueToday,
+    upcoming,
+    overdue,
+    recentlyCompleted,
+    counts: {
+      dueToday: dueToday.length,
+      upcoming: upcoming.length,
+      overdue: overdue.length,
+      needsReview: Number(needsReview),
+    },
+  };
+}
+
+// Returns the 11:59 PM default for dated assignments, quizzes, and projects
+// that were given no time, otherwise the time as given.
+function withDefaultDueTime(type, dueDate, dueTime) {
+  if (dueTime || !dueDate || !DEFAULT_TIME_TYPES.includes(type)) return dueTime ?? null;
+  return DEFAULT_DUE_TIME;
 }
 
 // Checks an item and returns the values ready to store.
@@ -355,13 +478,22 @@ function itemValues(item) {
     throw new Error("Weight must be between 0 and 100.");
   }
 
+  const estimatedMinutes = optionalInteger(item.estimatedMinutes, "Estimated minutes");
+  if (estimatedMinutes !== null && estimatedMinutes < 0) {
+    throw new Error("Estimated minutes cannot be negative.");
+  }
+
   return {
     title: requireText(item?.title, "item title"),
     type: oneOf(item.type, ITEM_TYPES, "Type", "assignment"),
     dueDate: optionalDate(item.dueDate, "Due date"),
-    dueTime: blankToNull(item.dueTime),
+    dueTime: optionalTime(item.dueTime),
     weightPct,
     status: oneOf(item.status, ITEM_STATUSES, "Status", "todo"),
+    priority: optionalChoice(item.priority, ITEM_PRIORITIES, "Priority"),
+    notes: blankToNull(item.notes),
+    estimatedMinutes,
+    color: optionalColor(item.color),
     termId: item.termId,
     courseId,
     source: oneOf(item.source, ITEM_SOURCES, "Source", "manual"),
@@ -397,20 +529,26 @@ function insertItem(values, options = {}) {
 
   const result = database.prepare(`
     INSERT INTO items (
-      title, type, due_date, due_time, weight_pct, status, term_id, course_id,
+      title, type, due_date, due_time, weight_pct, status, priority, notes,
+      estimated_minutes, color, term_id, course_id,
       source, date_text, week, weekday, source_quote, confidence, source_file,
-      ai_due_date, verified_at
+      ai_due_date, verified_at, completed_at
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-      CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+      CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END,
+      CASE WHEN ? = 'done' THEN datetime('now') ELSE NULL END
     )
   `).run(
     values.title,
     values.type,
     values.dueDate,
-    values.dueTime,
+    withDefaultDueTime(values.type, values.dueDate, values.dueTime),
     values.weightPct,
     values.status,
+    values.priority,
+    values.notes,
+    values.estimatedMinutes,
+    values.color,
     values.termId,
     values.courseId,
     values.source,
@@ -422,6 +560,7 @@ function insertItem(values, options = {}) {
     values.sourceFile,
     aiDueDate,
     markVerified ? 1 : 0,
+    values.status,
   );
 
   return getItem(insertId(result));
@@ -481,6 +620,12 @@ function updateItem(id, patch) {
     dueTime: patch.dueTime !== undefined ? patch.dueTime : existing.due_time,
     weightPct: patch.weightPct !== undefined ? patch.weightPct : existing.weight_pct,
     status: patch.status !== undefined ? patch.status : existing.status,
+    priority: patch.priority !== undefined ? patch.priority : existing.priority,
+    notes: patch.notes !== undefined ? patch.notes : existing.notes,
+    estimatedMinutes: patch.estimatedMinutes !== undefined
+      ? patch.estimatedMinutes
+      : existing.estimated_minutes,
+    color: patch.color !== undefined ? patch.color : existing.color,
     termId: patch.termId !== undefined ? patch.termId : existing.term_id,
     courseId: patch.courseId !== undefined ? patch.courseId : existing.course_id,
     source: patch.source !== undefined ? patch.source : existing.source,
@@ -501,9 +646,12 @@ function updateItem(id, patch) {
   const result = database.prepare(`
     UPDATE items
     SET title = ?, type = ?, due_date = ?, due_time = ?, weight_pct = ?,
-        status = ?, term_id = ?, course_id = ?, source = ?, date_text = ?,
+        status = ?, priority = ?, notes = ?, estimated_minutes = ?, color = ?,
+        term_id = ?, course_id = ?, source = ?, date_text = ?,
         week = ?, weekday = ?, source_quote = ?, confidence = ?, source_file = ?,
-        ai_due_date = ?
+        ai_due_date = ?,
+        completed_at = CASE WHEN ? = 'done' THEN COALESCE(completed_at, datetime('now')) ELSE NULL END,
+        updated_at = datetime('now')
     WHERE id = ?
   `).run(
     values.title,
@@ -512,6 +660,10 @@ function updateItem(id, patch) {
     values.dueTime,
     values.weightPct,
     values.status,
+    values.priority,
+    values.notes,
+    values.estimatedMinutes,
+    values.color,
     values.termId,
     values.courseId,
     values.source,
@@ -522,6 +674,7 @@ function updateItem(id, patch) {
     values.confidence,
     values.sourceFile,
     values.aiDueDate,
+    values.status,
     id,
   );
 
@@ -529,12 +682,25 @@ function updateItem(id, patch) {
   return getItem(id);
 }
 
+// Applies the same patch to every listed item in one transaction. Any error
+// rolls the whole batch back. Use it for bulk status, priority, course, or date changes.
+function updateItems(ids, patch) {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new Error("At least one item ID is required.");
+  }
+  return transaction(() => ids.map((id) => updateItem(id, patch || {})));
+}
+
 // Changes one item's status without touching its other fields.
 function setItemStatus(id, status) {
   const chosen = oneOf(status, ITEM_STATUSES, "Status");
   const result = database.prepare(`
-    UPDATE items SET status = ? WHERE id = ?
-  `).run(chosen, id);
+    UPDATE items
+    SET status = ?,
+        completed_at = CASE WHEN ? = 'done' THEN COALESCE(completed_at, datetime('now')) ELSE NULL END,
+        updated_at = datetime('now')
+    WHERE id = ?
+  `).run(chosen, chosen, id);
   if (result.changes === 0) throw new Error("Item not found.");
   return getItem(id);
 }
@@ -562,6 +728,15 @@ function deleteItem(id) {
   const result = database.prepare("DELETE FROM items WHERE id = ?").run(id);
   if (result.changes === 0) throw new Error("Item not found.");
   return true;
+}
+
+// Deletes every listed item in one transaction. A missing id rolls it all back.
+function deleteItems(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new Error("At least one item ID is required.");
+  }
+  transaction(() => ids.forEach((id) => deleteItem(id)));
+  return ids.length;
 }
 
 // Returns one item with its course code, name, and color, or undefined.
@@ -621,9 +796,8 @@ function listRecentChatMessages(limit = CHAT_HISTORY_LIMIT) {
 
 // Saves one chat message and returns the saved row.
 function addChatMessage(message) {
-  const role = blankToNull(message?.role);
+  const role = oneOf(blankToNull(message?.role), CHAT_ROLES, "Chat role");
   const content = blankToNull(message?.content);
-  if (!role) throw new Error("A chat role is required.");
   if (!content) throw new Error("Chat content is required.");
 
   const result = database.prepare(`
@@ -648,8 +822,10 @@ module.exports = {
   SCHEMA_VERSION,
   openDatabase,
   closeDatabase,
+  transaction,
   listTerms,
   getTerm,
+  getCurrentTerm,
   createTerm,
   updateTerm,
   deleteTerm,
@@ -661,13 +837,18 @@ module.exports = {
   listItems,
   getItem,
   listItemsInRange,
+  getSummary,
+  findDuplicate,
+  withDefaultDueTime,
   createItem,
   createItems,
   updateItem,
+  updateItems,
   setItemStatus,
   setItemVerified,
   verifyItems,
   deleteItem,
+  deleteItems,
   listUsage,
   logUsage,
   listChatMessages,
