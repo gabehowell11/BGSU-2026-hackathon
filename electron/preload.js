@@ -1,8 +1,18 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("aivana", {
-  // Sends a prompt to the main process and returns Aivana's answer.
+  // Sends a prompt to the main process and returns Aivana's answer (smoke test).
   generate: (prompt) => ipcRenderer.invoke("aivana:generate", prompt),
+  // Reads a syllabus, schedule, or photo and returns unsaved drafts to review.
+  // options: { termId, courseId?, files?: [{ name, data }], text? }. With no
+  // files and no text, a file picker opens. Returns { canceled, files, drafts }.
+  // Save confirmed drafts with database.createItems(drafts, { verified: true }).
+  extract: (options) => ipcRenderer.invoke("extract:run", options),
+  // Sends a chat message. Returns { reply, actions, rejected, messages }.
+  // Nothing changes until confirmed actions go to applyChatActions.
+  chat: (content) => ipcRenderer.invoke("chat:send", content),
+  // Applies the chat actions the user confirmed, all or nothing.
+  applyChatActions: (actions) => ipcRenderer.invoke("chat:apply-actions", actions),
 });
 
 contextBridge.exposeInMainWorld("database", {
@@ -22,16 +32,20 @@ contextBridge.exposeInMainWorld("database", {
   updateCourse: (id, course) => ipcRenderer.invoke("courses:update", id, course),
   // Deletes a course and the items that belong to it.
   deleteCourse: (id) => ipcRenderer.invoke("courses:delete", id),
-  // Returns items, optionally limited to one term.
+  // Returns items. Optional filter: { termId, courseId, status, type, priority, verified, search }.
   listItems: (filter) => ipcRenderer.invoke("items:list", filter),
-  // Returns items due between two dates.
-  listItemsInRange: (from, to) => ipcRenderer.invoke("items:list-range", from, to),
+  // Returns items due between two dates, with the same optional filter.
+  listItemsInRange: (from, to, filter) => ipcRenderer.invoke("items:list-range", from, to, filter),
+  // Returns the home page summary for today (or a given YYYY-MM-DD).
+  getSummary: (today) => ipcRenderer.invoke("items:summary", today),
   // Saves one item.
   createItem: (item) => ipcRenderer.invoke("items:create", item),
   // Saves many items in one transaction, and can mark the batch verified.
   createItems: (items, options) => ipcRenderer.invoke("items:create-many", items, options),
   // Updates only the item fields that were sent.
   updateItem: (id, item) => ipcRenderer.invoke("items:update", id, item),
+  // Applies one patch to many items, all or nothing (bulk status, priority, course, date).
+  updateItems: (ids, patch) => ipcRenderer.invoke("items:update-many", ids, patch),
   // Changes one item's status.
   setItemStatus: (id, status) => ipcRenderer.invoke("items:set-status", id, status),
   // Marks one item verified.
@@ -40,6 +54,10 @@ contextBridge.exposeInMainWorld("database", {
   verifyItems: (ids) => ipcRenderer.invoke("items:verify-many", ids),
   // Deletes one item.
   deleteItem: (id) => ipcRenderer.invoke("items:delete", id),
+  // Deletes many items, all or nothing.
+  deleteItems: (ids) => ipcRenderer.invoke("items:delete-many", ids),
+  // Saves verified, dated items to an .ics file the user picks. Same optional filter as listItems.
+  exportIcs: (filter) => ipcRenderer.invoke("export:ics", filter),
   // Returns recorded Aivana usage, newest first.
   listUsage: () => ipcRenderer.invoke("usage:list"),
   // Returns the full saved chat.
