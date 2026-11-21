@@ -1,7 +1,15 @@
 import React from "react";
 import Icon from "./Icon";
 
-export default function Sidebar({ collapsed, setCollapsed, page, setPage, courses }) {
+export default function Sidebar({ collapsed, setCollapsed, page, setPage, courses, profileName }) {
+  const displayName = profileName || "Student";
+  const initials = displayName
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
   const links = [
     ["home", "Home"],
     ["calendar", "Calendar"],
@@ -37,7 +45,7 @@ export default function Sidebar({ collapsed, setCollapsed, page, setPage, course
           </div>
         </>
       )}
-      <button className="profile" type="button" title="Profile"><span className="avatar">CE</span>{!collapsed && <><span className="profile-name">Carter</span><Icon name="more" /></>}</button>
+      <button className="profile" type="button" title="Profile"><span className="avatar">{initials}</span>{!collapsed && <><span className="profile-name">{displayName}</span><Icon name="more" /></>}</button>
     </aside>
   );
 }

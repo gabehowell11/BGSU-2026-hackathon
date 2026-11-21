@@ -1,5 +1,15 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+contextBridge.exposeInMainWorld("appWindow", {
+  minimize: () => ipcRenderer.invoke("window:minimize"),
+  maximize: () => ipcRenderer.invoke("window:maximize"),
+  close: () => ipcRenderer.invoke("window:close"),
+});
+
+contextBridge.exposeInMainWorld("profile", {
+  get: () => ipcRenderer.invoke("profile:get"),
+});
+
 contextBridge.exposeInMainWorld("aivana", {
   // Sends a prompt to the main process and returns Aivana's answer (smoke test).
   generate: (prompt) => ipcRenderer.invoke("aivana:generate", prompt),

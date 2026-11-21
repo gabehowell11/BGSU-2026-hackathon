@@ -1,17 +1,26 @@
 require("dotenv").config();
 
 const path = require("node:path");
-const { app, BrowserWindow } = require("electron");
+const os = require("node:os");
+const { app, BrowserWindow, ipcMain, Menu } = require("electron");
 const database = require("./database");
 const { registerIpcHandlers } = require("./ipc");
 
 app.setName("AI Student Task Manager");
+Menu.setApplicationMenu(null);
+
+let mainWindow;
 
 // Opens the app window, loading the Vite dev server or the built page.
 function createWindow() {
-  const window = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1920,
     height: 1080,
+    frame: false,
+    titleBarStyle: "hidden",
+    minWidth: 900,
+    minHeight: 600,
+    backgroundColor: "#17181b",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -21,11 +30,23 @@ function createWindow() {
 
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   if (devServerUrl) {
-    window.loadURL(devServerUrl);
+    mainWindow.loadURL(devServerUrl);
   } else {
-    window.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+    mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
 }
+
+ipcMain.handle("window:minimize", () => mainWindow?.minimize());
+ipcMain.handle("window:maximize", () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+  else mainWindow.maximize();
+});
+ipcMain.handle("window:close", () => mainWindow?.close());
+ipcMain.handle("profile:get", () => {
+  const systemName = process.env.USERNAME || os.userInfo().username || "Student";
+  return { systemName };
+});
 
 // Opens the database and the window once Electron is ready.
 app.whenReady().then(() => {
