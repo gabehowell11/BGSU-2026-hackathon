@@ -6,7 +6,7 @@ if (!appData) {
   throw new Error("APPDATA is not set, so the Electron database folder cannot be found.");
 }
 
-const userDataDirectory = path.join(appData, "aivana-electron-app");
+const userDataDirectory = path.join(appData, "ai-student-task-manager");
 
 const termInput = {
   name: "Fall 2026",
