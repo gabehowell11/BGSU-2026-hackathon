@@ -64,6 +64,31 @@ const extractionResultSchema = {
   required: ["items"],
 };
 
+// Setup mode (no term saved yet): Aivana also reads the term and course.
+const setupExtractionResultSchema = {
+  ...extractionResultSchema,
+  properties: {
+    ...extractionResultSchema.properties,
+    term: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        name: { type: "string" },
+        start_date: isoDate,
+        end_date: isoDate,
+      },
+    },
+    course: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        code: { type: "string" },
+        name: { type: "string" },
+      },
+    },
+  },
+};
+
 // Chat replies: the text to show plus proposed changes the user must confirm.
 const CHAT_ACTION_OPS = ["create", "update", "delete"];
 
@@ -124,6 +149,7 @@ module.exports = {
   CHAT_HISTORY_LIMIT,
   extractionItemSchema,
   extractionResultSchema,
+  setupExtractionResultSchema,
   CHAT_ACTION_OPS,
   chatResponseSchema,
 };
