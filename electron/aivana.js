@@ -2,6 +2,28 @@ const database = require("./database");
 
 let client;
 
+function isTemporaryError(error) {
+  return error?.constructor?.name === "UpstreamError"
+    || error?.code === "upstream_error"
+    || error?.status === 502
+    || error?.status === 503
+    || error?.status === 504;
+}
+
+async function retryTemporary(send) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await send();
+    } catch (error) {
+      lastError = error;
+      if (!isTemporaryError(error) || attempt === 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 750 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
 // Returns one shared Aivana client, created on first use.
 async function getClient() {
   if (!process.env.AIVANA_API_KEY) {
@@ -9,7 +31,7 @@ async function getClient() {
   }
   if (!client) {
     const { default: Aivana } = await import("@aivana/sdk");
-    client = new Aivana({ apiKey: process.env.AIVANA_API_KEY });
+    client = new Aivana({ apiKey: process.env.AIVANA_API_KEY, timeoutMs: 90_000 });
   }
   return client;
 }
@@ -44,6 +66,9 @@ function looseSchema(schema) {
 // Calls Aivana for JSON that matches the schema and returns the parsed object.
 // Retries once with a looser schema if Aivana rejects the schema itself.
 async function generateStructured({ feature, prompt, schema, ...options }) {
+  if (typeof prompt === "string" && prompt.length > 20000) {
+    throw new Error("Aivana prompt limit exceeded. The document must be split into smaller chunks.");
+  }
   const aivana = await getClient();
   const send = (format) => aivana.generate(prompt ?? null, {
     ...options,
@@ -52,11 +77,11 @@ async function generateStructured({ feature, prompt, schema, ...options }) {
 
   let response;
   try {
-    response = await send(schema);
+    response = await retryTemporary(() => send(schema));
   } catch (error) {
     if (error?.code !== "invalid_response_schema") throw friendlyError(error);
     try {
-      response = await send(looseSchema(schema));
+      response = await retryTemporary(() => send(looseSchema(schema)));
     } catch (retryError) {
       throw friendlyError(retryError);
     }
@@ -85,6 +110,9 @@ function friendlyError(error) {
   if (name === "AuthError") return new Error("Aivana rejected the API key. Check AIVANA_API_KEY in .env.");
   if (name === "RateLimitError") return new Error("Aivana's rate limit or quota was reached. Try again shortly.");
   if (name === "UpstreamError") return new Error("Aivana had a temporary problem. Try again.");
+  if (error?.name === "AbortError" || error?.code === "timeout") {
+    return new Error("Aivana timed out. Try a smaller or text-based file.");
+  }
   return error instanceof Error ? error : new Error(String(error));
 }
 

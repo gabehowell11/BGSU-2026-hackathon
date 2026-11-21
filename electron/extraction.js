@@ -27,6 +27,7 @@ const MIB = 1024 * 1024;
 const MAX_FILES = 5;
 const MAX_TOTAL_BYTES = 40 * MIB;
 const MAX_TEXT_CHARS = 400000;
+const API_PROMPT_CHARS = 12000;
 const LOW_CONFIDENCE = 0.6;
 
 // File types Aivana reads directly, with its per-file size limits.
@@ -44,7 +45,7 @@ const ATTACHMENT_TYPES = {
   ".gif": { mimeType: "image/gif", maxBytes: 8 * MIB },
 };
 // Plain text files are read here and pasted into the prompt.
-const TEXT_EXTENSIONS = [".txt", ".md"];
+const TEXT_EXTENSIONS = [".txt", ".md", ".csv"];
 
 // Token saving: Aivana bills a PDF at about 2,300 tokens per page, but text at
 // about 1 token per 4 characters. A PDF with a real text layer is sent as its
@@ -117,6 +118,73 @@ function compactText(text) {
     .trim();
 }
 
+// Aivana limits one workspace prompt to 20,000 characters. Split on paragraph
+// boundaries and keep every API prompt below that limit.
+function splitDocumentText(text, maxChars = API_PROMPT_CHARS) {
+  const clean = compactText(text);
+  if (!clean) return [];
+  if (clean.length <= maxChars) return [clean];
+
+  const chunks = [];
+  let current = "";
+  for (const block of clean.split(/\n{2,}/)) {
+    const candidate = current ? `${current}\n\n${block}` : block;
+    if (candidate.length <= maxChars) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) chunks.push(current);
+    if (block.length <= maxChars) {
+      current = block;
+      continue;
+    }
+
+    let start = 0;
+    while (start < block.length) {
+      let end = Math.min(start + maxChars, block.length);
+      if (end < block.length) {
+        const newline = block.lastIndexOf("\n", end);
+        if (newline > start + Math.floor(maxChars * 0.75)) end = newline;
+      }
+      chunks.push(block.slice(start, end).trim());
+      start = end;
+    }
+    current = "";
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function mergeExtractedItems(items) {
+  const merged = [];
+  const seen = new Set();
+  for (const item of Array.isArray(items) ? items : []) {
+    const title = blankToNull(item?.title)?.toLowerCase() || "";
+    const date = blankToNull(item?.due_date) || "";
+    const key = `${title}\0${date}`;
+    if (!title || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+  return merged;
+}
+
+// Cheap local date preflight. Files without a date-like value never reach
+// Aivana, which prevents a paid extraction request for unrelated documents.
+function containsLikelyDate(text) {
+  const value = String(text || "");
+  if (!value.trim()) return false;
+
+  return [
+    /\b\d{4}-\d{1,2}-\d{1,2}\b/,
+    /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?\b/i,
+    /\b\d{1,2}\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i,
+    /\b(?:\d{1,2}[/-]){1,2}\d{2,4}\b/,
+    /\b(?:week|module)\s*\d{1,2}\b.{0,40}\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|friday)\b/i,
+  ].some((pattern) => pattern.test(value));
+}
+
 // Returns a PDF's text when it has a real text layer, or null for scanned or
 // unreadable PDFs (those are sent to Aivana as the file instead).
 async function pdfText(bytes) {
@@ -151,26 +219,61 @@ async function prepareFiles(files) {
     totalBytes += bytes.length;
 
     if (TEXT_EXTENSIONS.includes(extension)) {
-      texts.push({ name, text: compactText(bytes.toString("utf8")) });
+      const text = compactText(bytes.toString("utf8"));
+      texts.push({
+        name,
+        text,
+        sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+        fileSize: bytes.length,
+      });
       continue;
+    }
+
+    if (extension === ".docx") {
+      try {
+        const mammoth = await import("mammoth");
+        const result = await mammoth.extractRawText({
+          buffer: bytes,
+        });
+        const text = compactText(result.value);
+        if (!text) throw new Error("No readable text was found.");
+        texts.push({
+          name,
+          text,
+          sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+          fileSize: bytes.length,
+        });
+        continue;
+      } catch (error) {
+        throw new Error(`${name} could not be read as text: ${error.message}`);
+      }
     }
 
     const type = ATTACHMENT_TYPES[extension];
     if (!type) {
-      throw new Error(`${name} is not a supported file. Use PDF, Word (.docx), CSV, TXT, or an image.`);
+      throw new Error(`${name} is not a supported file. Use PDF, Word (.docx), CSV, TXT, or Markdown.`);
     }
     if (bytes.length > type.maxBytes) {
       throw new Error(`${name} is larger than ${type.maxBytes / MIB} MB.`);
+    }
+    if (extension !== ".pdf") {
+      throw new Error(`${name} is an image. Upload a text-based PDF or TXT file instead.`);
     }
 
     if (extension === ".pdf") {
       const extracted = await pdfText(bytes);
       if (extracted) {
-        texts.push({ name, text: extracted.text, pages: extracted.pages });
+        texts.push({
+          name,
+          text: extracted.text,
+          pages: extracted.pages,
+          sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+          fileSize: bytes.length,
+        });
         continue;
       }
+      throw new Error(`${name} appears to be scanned or has no readable text. Upload a text-based PDF or TXT file instead.`);
     }
-    attachments.push({ name, mimeType: type.mimeType, data: bytes.toString("base64") });
   }
 
   if (totalBytes > MAX_TOTAL_BYTES) {
@@ -333,11 +436,25 @@ async function runExtraction(event, options = {}) {
   if (pastedText) texts.push({ name: "pasted text", text: compactText(pastedText) });
 
   const documentText = texts.map((entry) => `--- ${entry.name} ---\n${entry.text}`).join("\n\n");
+  const fileNames = [...attachments.map((file) => file.name), ...texts.map((entry) => entry.name)];
   if (documentText.length > MAX_TEXT_CHARS) {
     throw new Error("The text is too long. Split it into smaller pieces.");
   }
+  if (!containsLikelyDate(documentText)) {
+    return {
+      canceled: false,
+      noDates: true,
+      reason: "No dates or date-bearing schedule information were found, so this file was not sent to Aivana.",
+      cached: false,
+      files: fileNames,
+      sentAsText: [],
+      sentAsFile: [],
+      suggestedTerm: null,
+      suggestedCourse: null,
+      drafts: [],
+    };
+  }
 
-  const fileNames = [...attachments.map((file) => file.name), ...texts.map((entry) => entry.name)];
   const context = setupMode
     ? [
       "No term or course is set up yet.",
@@ -349,31 +466,50 @@ async function runExtraction(event, options = {}) {
       `Term: ${term.name}, ${term.start_date} to ${term.end_date}.`,
       course ? `Course: ${course.code} ${course.name}.` : "Course: not specified.",
     ];
-  const prompt = [
+  const documentChunks = splitDocumentText(documentText);
+  const prompts = documentChunks.map((chunk, index) => [
     ...context,
-    attachments.length ? `Attached: ${attachments.map((file) => file.name).join(", ")}.` : "",
-    "List every dated item in these documents.",
-    documentText ? `\n${documentText}` : "",
-  ].filter(Boolean).join("\n");
+    `Document chunk ${index + 1} of ${documentChunks.length}.`,
+    "List every dated item in this chunk. Do not invent items or dates.",
+    `\n${chunk}`,
+  ].join("\n"));
 
-  const cacheKey = extractionCacheKey(prompt, attachments);
+  const cacheKey = extractionCacheKey(
+    `${setupMode ? "setup" : "normal"}\n${context.join("\n")}\n${documentText}`,
+    [],
+  );
   let result = options?.force === true ? null : database.getCachedExtraction(cacheKey);
   if (Array.isArray(result)) result = { items: result };
   const cached = result !== null;
   if (!cached) {
-    const { data } = await aivana.generateStructured({
-      feature: "extract",
-      prompt,
-      schema: setupMode ? setupExtractionResultSchema : extractionResultSchema,
-      system: SYSTEM_PROMPT,
-      temperature: 0,
-      webSearch: false,
-      attachments: attachments.map(({ mimeType, data: base64 }) => ({ mimeType, data: base64 })),
-    });
+    const extractedItems = [];
+    let suggestedTerm = null;
+    let suggestedCourse = null;
+
+    for (const prompt of prompts) {
+      if (prompt.length > 20000) {
+        throw new Error("Document text could not be split small enough for Aivana.");
+      }
+      const { data } = await aivana.generateStructured({
+        feature: "extract",
+        prompt,
+        schema: setupMode ? setupExtractionResultSchema : extractionResultSchema,
+        system: SYSTEM_PROMPT,
+        temperature: 0,
+        webSearch: false,
+        attachments: [],
+      });
+      extractedItems.push(...(Array.isArray(data.items) ? data.items : []));
+      if (setupMode) {
+        suggestedTerm ||= data.term ?? null;
+        suggestedCourse ||= data.course ?? null;
+      }
+    }
+
     result = {
-      items: Array.isArray(data.items) ? data.items : [],
-      term: setupMode ? data.term ?? null : null,
-      course: setupMode ? data.course ?? null : null,
+      items: mergeExtractedItems(extractedItems),
+      term: suggestedTerm,
+      course: suggestedCourse,
     };
     database.saveCachedExtraction(cacheKey, result);
   }
@@ -395,6 +531,20 @@ async function runExtraction(event, options = {}) {
     .map((raw, index) => toDraft(raw, index, { term: draftTerm, courseId, sourceFile }))
     .sort((a, b) => (a.dueDate || "9999").localeCompare(b.dueDate || "9999"));
 
+  for (const entry of texts) {
+    if (!entry?.name || entry.name === "pasted text") continue;
+    database.saveUploadedFile({
+      name: entry.name,
+      mimeType: path.extname(entry.name).toLowerCase() === ".pdf"
+        ? "application/pdf"
+        : "text/plain",
+      fileSize: entry.fileSize,
+      plaintext: entry.text,
+      sha256: entry.sha256,
+      draftCount: drafts.length,
+    });
+  }
+
   return {
     canceled: false,
     cached,
@@ -414,4 +564,11 @@ function registerExtractionHandlers() {
   ipcMain.handle("extract:run", (event, options) => runExtraction(event, options));
 }
 
-module.exports = { registerExtractionHandlers, compactText, pdfText };
+module.exports = {
+  registerExtractionHandlers,
+  compactText,
+  pdfText,
+  containsLikelyDate,
+  splitDocumentText,
+  mergeExtractedItems,
+};

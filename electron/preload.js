@@ -23,7 +23,19 @@ contextBridge.exposeInMainWorld("aivana", {
   // Without one (onboarding): suggestedTerm { name, startDate, endDate } and
   // suggestedCourse { code, name } are filled from the documents; save with
   // database.createSetup({ term, course, items }).
-  extract: (options) => ipcRenderer.invoke("extract:run", options),
+  extract: (options) => {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("Scanning timed out. Try a smaller or text-based file.")),
+        10 * 60 * 1000,
+      );
+    });
+    return Promise.race([
+      ipcRenderer.invoke("extract:run", options),
+      timeout,
+    ]).finally(() => clearTimeout(timer));
+  },
   // Sends a chat message. Returns { reply, actions, rejected, messages }.
   // Nothing changes until confirmed actions go to applyChatActions.
   chat: (content) => ipcRenderer.invoke("chat:send", content),
@@ -95,4 +107,7 @@ contextBridge.exposeInMainWorld("database", {
   listRecentChatMessages: () => ipcRenderer.invoke("chat:recent"),
   // Deletes every saved chat message.
   clearChatMessages: () => ipcRenderer.invoke("chat:clear"),
+  // Returns and deletes the local registry of files sent or reused with Aivana.
+  listUploadedFiles: () => ipcRenderer.invoke("uploaded-files:list"),
+  deleteUploadedFile: (id) => ipcRenderer.invoke("uploaded-files:delete", id),
 });
