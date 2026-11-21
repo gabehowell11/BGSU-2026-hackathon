@@ -44,6 +44,8 @@ const CONTEXT_LINES = 2;
 const MIN_SPLIT_CHARS = 200;
 // How many requests run at the same time.
 const PARALLEL_REQUESTS = 3;
+// The most grading text that is repeated with every part.
+const WEIGHT_LINES_MAX_CHARS = 800;
 
 // File types Aivana reads directly, with its per-file size limits.
 const ATTACHMENT_TYPES = {
@@ -72,10 +74,12 @@ const SYSTEM_PROMPT = `You read course documents (syllabi, schedules, assignment
 Rules:
 - One item per graded assignment, quiz, exam, project, and per holiday or no-class day. Use type "other" for anything else that has a date.
 - Only list items that are actually in the document. Never invent items or dates.
+- title is short and names the one item, with its number when it has one: "Homework 2", "Quiz 1", "Midterm exam". Write abbreviations out ("HW 2" becomes "Homework 2") and leave out words such as "due". When the document gives several of the same kind in order ("five homework assignments, due in Weeks 2, 4 and 6"), list each one and number them in that order.
+- Several days ("Mon-Tue", "November 25 through 27", "Tuesday and Thursday") are one item per day, each with its own date or weekday and the item's full weight.
 - due_date is YYYY-MM-DD. Give it only when the document states or clearly implies a calendar date. Use the term dates provided to choose the year.
-- When the document says something like "Week 11 Friday", fill week (number) and weekday (full English name) and leave due_date out.
-- due_time is 24-hour HH:MM, only when stated.
-- weight_pct is the share of the final grade (0-100), only when stated.
+- When the document says something like "Week 11 Friday", or a schedule row for week 11 says "due Fri", fill week (number) and weekday (full English name) and leave due_date out.
+- due_time is 24-hour HH:MM, only when stated. When something opens and closes, list it once with the closing time. For an exam or event with a start and end time, use the start time.
+- weight_pct is the share of the final grade (0-100) for that one item, only when stated. When the grading section gives a weight for each of several items ("5 homework assignments, 5% each"), use the each value, not the total.
 - date_text is the date wording exactly as written in the document.
 - source_quote is the shortest exact phrase from the document that supports the item, at most 25 words.
 - confidence is 0 to 1: how sure you are the item and its date are correct.
@@ -356,19 +360,143 @@ function parsePlainAnswer(text) {
   return data;
 }
 
-// Drops repeated items (same title and date), which parts that overlap can produce.
+// Returns the lines that state grade weights ("Homework 5% each"). They are
+// sent with every part, so an item listed far from the grading section still
+// gets its weight.
+function weightLines(text) {
+  const lines = [];
+  let length = 0;
+  for (const line of String(text || "").split("\n")) {
+    const clean = line.trim();
+    if (!/\d\s?%/.test(clean) || lines.includes(clean)) continue;
+    length += clean.length + 1;
+    if (length > WEIGHT_LINES_MAX_CHARS) break;
+    lines.push(clean);
+  }
+  return lines;
+}
+
+// Drops exact repeats: the same title with the same date, week, and weekday.
 function mergeExtractedItems(items) {
   const merged = [];
   const seen = new Set();
   for (const item of Array.isArray(items) ? items : []) {
-    const title = blankToNull(item?.title)?.toLowerCase() || "";
-    const date = blankToNull(item?.due_date) || "";
-    const key = `${title}\0${date}`;
+    const title = blankToNull(item?.title);
+    const key = [title, item?.due_date, item?.week, item?.weekday]
+      .map((part) => String(part ?? "").trim().toLowerCase())
+      .join("\0");
     if (!title || seen.has(key)) continue;
     seen.add(key);
     merged.push(item);
   }
   return merged;
+}
+
+// Words that do not help tell one item's title from another's.
+const TITLE_FILLER = new Set(["a", "an", "and", "at", "due", "for", "in", "no", "of", "on", "the"]);
+const TITLE_ALIASES = { hw: "homework", quizzes: "quiz" };
+
+// Splits a title into its words and its numbers, so "HW 2 due" and
+// "Homework 2" compare as the same title.
+function titleParts(title) {
+  const words = new Set();
+  const numbers = new Set();
+  for (const token of String(title || "").toLowerCase().match(/[a-z]+|\d+/g) || []) {
+    if (/\d/.test(token)) {
+      numbers.add(Number(token));
+      continue;
+    }
+    const word = TITLE_ALIASES[token] || token;
+    if (TITLE_FILLER.has(word)) continue;
+    // "assignments" and "assignment" count as the same word.
+    words.add(word.length > 3 && /[^s]s$/.test(word) ? word.slice(0, -1) : word);
+  }
+  return { words, numbers };
+}
+
+// Words that are too general to tell two titles apart when other words are present.
+const TITLE_GENERAL = new Set(["assignment", "class", "course", "exam", "final", "group", "project", "team"]);
+
+// True when every word of the smaller set is in the larger one.
+function wordsWithin(a, b) {
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  return small.size > 0 && [...small].every((word) => large.has(word));
+}
+
+// True when two titles name the same thing: no conflicting numbers ("Quiz 1"
+// is not "Quiz 2"), and the words of one are all found in the other ("MIDTERM"
+// and "Midterm exam"). General words are compared only when a title has
+// nothing else, so "Final presentation" matches "Project presentations" but
+// "Final exam" does not match "Final project".
+function sameTitle(a, b) {
+  if (a.numbers.size > 0 && b.numbers.size > 0
+    && (a.numbers.size !== b.numbers.size || [...a.numbers].some((number) => !b.numbers.has(number)))) {
+    return false;
+  }
+  const specific = (words) => new Set([...words].filter((word) => !TITLE_GENERAL.has(word)));
+  const [first, second] = [specific(a.words), specific(b.words)];
+  return first.size > 0 && second.size > 0 ? wordsWithin(first, second) : wordsWithin(a.words, b.words);
+}
+
+// True when two entries in mergeSameItems have matching types (or one is
+// "other") and titles that name the same thing.
+function sameKind(a, b) {
+  return (a.type === b.type || a.type === "other" || b.type === "other") && sameTitle(a.parts, b.parts);
+}
+
+// True when a value from Aivana is missing.
+function isBlank(value) {
+  return value === undefined || value === null || value === "";
+}
+
+// Merges items that are the same thing written in two places, such as a
+// midterm described in a paragraph and listed again in the weekly schedule.
+// Items match on the same date (after week and weekday are turned into a date
+// with the term), the same type, and titles that name the same thing. The
+// copy with the clearer title is kept and takes the other's weight and time.
+// An undated item is dropped when a dated copy of it exists.
+function mergeSameItems(items, term) {
+  const kept = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    const week = lenient(() => optionalInteger(item?.week, "Week"));
+    const weekday = lenient(() => optionalWeekday(item?.weekday));
+    const entry = {
+      item,
+      date: resolveWeekDate(term, week, weekday) || aiDate(item?.due_date),
+      week,
+      type: EXTRACTION_TYPES.includes(item?.type) ? item.type : "other",
+      parts: titleParts(item?.title),
+      confidence: Number(item?.confidence) || 0,
+    };
+
+    const match = kept.find((other) => other.date === entry.date
+      && (entry.date || other.week === entry.week)
+      && sameKind(entry, other));
+    if (!match) {
+      kept.push(entry);
+      continue;
+    }
+
+    // Keep the numbered title ("Homework 2" over "Homework assignments"), then the surer one.
+    const numbered = (entry.parts.numbers.size > 0) - (match.parts.numbers.size > 0);
+    const [best, other] = numbered > 0 || (numbered === 0 && entry.confidence > match.confidence)
+      ? [entry, match]
+      : [match, entry];
+    const merged = { ...best.item };
+    for (const field of ["weight_pct", "due_time"]) {
+      if (isBlank(merged[field]) && !isBlank(other.item[field])) merged[field] = other.item[field];
+    }
+    if (other.confidence > best.confidence) merged.confidence = other.item.confidence;
+    Object.assign(match, {
+      item: merged,
+      type: best.type,
+      parts: best.parts,
+      confidence: Math.max(best.confidence, other.confidence),
+    });
+  }
+  return kept
+    .filter((entry) => entry.date || !kept.some((other) => other.date && sameKind(entry, other)))
+    .map((entry) => entry.item);
 }
 
 // Cheap local date preflight. Files without a date-like value never reach
@@ -655,6 +783,7 @@ async function runExtraction(event, options = {}) {
   // Problems the user should know about, such as a part that was only partly read.
   const warnings = [];
   const format = plainFormat(setupMode);
+  const gradingLines = weightLines(documentText);
 
   // Sends one request and returns the parsed answer: { items, term?, course?,
   // cutOff? }, or null when the answer held no JSON.
@@ -671,13 +800,15 @@ async function runExtraction(event, options = {}) {
   // When the answer is cut off, the part is halved and each half is read on
   // its own, so nothing is lost; a part too short to halve keeps what arrived.
   const readText = async (chunk, lead) => {
+    const grading = gradingLines.filter((line) => !chunk.includes(line));
     const data = await ask([
       ...context,
       "This is one part of the documents.",
       "List every dated item in this part. Do not invent items or dates.",
       format,
+      ...(grading.length > 0 ? [`\nGrading lines from elsewhere in the documents, for weight_pct only. Do not list items from them:\n${grading.join("\n")}`] : []),
       ...(lead ? [`\nThe lines just before this part, for context only. Do not list items from them:\n${lead}`] : []),
-      `\n${lead ? "This part:\n" : ""}${chunk}`,
+      `\n${lead || grading.length > 0 ? "This part:\n" : ""}${chunk}`,
     ].join("\n"), []);
     if (data && !data.cutOff) return [data];
 
@@ -756,8 +887,7 @@ async function runExtraction(event, options = {}) {
 
   // Drafts are rebuilt every time, so duplicate flags reflect what is saved now.
   const sourceFile = fileNames.join(", ").slice(0, 255) || null;
-  const rawItems = Array.isArray(result.items) ? result.items : [];
-  const drafts = rawItems
+  const drafts = mergeSameItems(result.items, draftTerm)
     .map((raw, index) => toDraft(raw, index, { term: draftTerm, courseId, sourceFile }))
     .sort((a, b) => (a.dueDate || "9999").localeCompare(b.dueDate || "9999"));
 
@@ -815,4 +945,5 @@ module.exports = {
   containsLikelyDate,
   splitDocumentText,
   mergeExtractedItems,
+  mergeSameItems,
 };
