@@ -1,3 +1,4 @@
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { ipcMain, dialog, BrowserWindow } = require("electron");
@@ -41,6 +42,12 @@ const ATTACHMENT_TYPES = {
 // Plain text files are read here and pasted into the prompt.
 const TEXT_EXTENSIONS = [".txt", ".md"];
 
+// Token saving: Aivana bills a PDF at about 2,300 tokens per page, but text at
+// about 1 token per 4 characters. A PDF with a real text layer is sent as its
+// text (typically 3-4x cheaper). A PDF averaging fewer characters per page
+// than this is treated as scanned and sent as the file, so Aivana can read it.
+const MIN_PDF_CHARS_PER_PAGE = 200;
+
 const SYSTEM_PROMPT = `You read course documents (syllabi, schedules, assignment sheets, photos of handouts) and list every dated academic item for a student planner.
 Rules:
 - One item per graded assignment, quiz, exam, project, and per holiday or no-class day. Use type "other" for anything else that has a date.
@@ -50,7 +57,7 @@ Rules:
 - due_time is 24-hour HH:MM, only when stated.
 - weight_pct is the share of the final grade (0-100), only when stated.
 - date_text is the date wording exactly as written in the document.
-- source_quote is the shortest exact sentence or table row from the document that supports the item.
+- source_quote is the shortest exact phrase from the document that supports the item, at most 25 words.
 - confidence is 0 to 1: how sure you are the item and its date are correct.
 - A recurring item with no specific dates or weeks ("weekly reading responses") is one item with date_text describing it and no due_date.`;
 
@@ -96,8 +103,35 @@ function toBuffer(data, name) {
   throw new Error(`${name} has no file data.`);
 }
 
+// Collapses runs of spaces and blank lines, which cost tokens but carry no meaning.
+function compactText(text) {
+  return String(text)
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t\f\v ]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// Returns a PDF's text when it has a real text layer, or null for scanned or
+// unreadable PDFs (those are sent to Aivana as the file instead).
+async function pdfText(bytes) {
+  try {
+    const { extractText, getDocumentProxy } = await import("unpdf");
+    const pdf = await getDocumentProxy(new Uint8Array(bytes));
+    const { totalPages, text } = await extractText(pdf, { mergePages: true });
+    const clean = compactText(text);
+    if (totalPages > 0 && clean.length / totalPages >= MIN_PDF_CHARS_PER_PAGE) {
+      return { text: clean, pages: totalPages };
+    }
+  } catch (error) {
+    console.warn(`PDF text extraction failed, sending the file instead: ${error.message}`);
+  }
+  return null;
+}
+
 // Checks every file's type and size and splits them into attachments and plain text.
-function prepareFiles(files) {
+async function prepareFiles(files) {
   if (files.length > MAX_FILES) {
     throw new Error(`Upload at most ${MAX_FILES} files at a time.`);
   }
@@ -113,7 +147,7 @@ function prepareFiles(files) {
     totalBytes += bytes.length;
 
     if (TEXT_EXTENSIONS.includes(extension)) {
-      texts.push({ name, text: bytes.toString("utf8") });
+      texts.push({ name, text: compactText(bytes.toString("utf8")) });
       continue;
     }
 
@@ -124,6 +158,14 @@ function prepareFiles(files) {
     if (bytes.length > type.maxBytes) {
       throw new Error(`${name} is larger than ${type.maxBytes / MIB} MB.`);
     }
+
+    if (extension === ".pdf") {
+      const extracted = await pdfText(bytes);
+      if (extracted) {
+        texts.push({ name, text: extracted.text, pages: extracted.pages });
+        continue;
+      }
+    }
     attachments.push({ name, mimeType: type.mimeType, data: bytes.toString("base64") });
   }
 
@@ -131,6 +173,20 @@ function prepareFiles(files) {
     throw new Error("The files add up to more than 40 MB. Upload fewer at a time.");
   }
   return { attachments, texts };
+}
+
+// Returns a hash of everything sent to Aivana, so identical uploads reuse the
+// saved result. Prompt or rule changes produce a new key automatically.
+function extractionCacheKey(prompt, attachments) {
+  const hash = crypto.createHash("sha256");
+  hash.update(SYSTEM_PROMPT);
+  hash.update("\0");
+  hash.update(prompt);
+  for (const file of attachments) {
+    hash.update(`\0${file.mimeType}\0`);
+    hash.update(file.data);
+  }
+  return hash.digest("hex");
 }
 
 // Returns the date of a weekday in a term week. Week 1 is the Monday-to-Sunday
@@ -210,9 +266,11 @@ function toDraft(raw, index, { term, courseId, sourceFile }) {
 }
 
 // Sends files or pasted text to Aivana and returns unsaved drafts for the user to confirm.
-// options: { termId, courseId?, files?: [{ name, data }], text? }. With no files
-// and no text, a file picker opens. Drafts are NOT saved: after the user edits
-// and confirms them, call database.createItems(drafts, { verified: true }).
+// options: { termId, courseId?, files?: [{ name, data }], text?, force? }. With no
+// files and no text, a file picker opens. Drafts are NOT saved: after the user
+// edits and confirms them, call database.createItems(drafts, { verified: true }).
+// The same documents for the same term and course reuse the saved Aivana result
+// (no tokens spent) unless force is true.
 async function runExtraction(event, options = {}) {
   const termId = requiredId(options?.termId, "term");
   const term = database.getTerm(termId);
@@ -233,8 +291,8 @@ async function runExtraction(event, options = {}) {
     if (!files) return { canceled: true, drafts: [] };
   }
 
-  const { attachments, texts } = prepareFiles(files);
-  if (pastedText) texts.push({ name: "pasted text", text: pastedText });
+  const { attachments, texts } = await prepareFiles(files);
+  if (pastedText) texts.push({ name: "pasted text", text: compactText(pastedText) });
 
   const documentText = texts.map((entry) => `--- ${entry.name} ---\n${entry.text}`).join("\n\n");
   if (documentText.length > MAX_TEXT_CHARS) {
@@ -250,22 +308,38 @@ async function runExtraction(event, options = {}) {
     documentText ? `\n${documentText}` : "",
   ].filter(Boolean).join("\n");
 
-  const { data } = await aivana.generateStructured({
-    feature: "extract",
-    prompt,
-    schema: extractionResultSchema,
-    system: SYSTEM_PROMPT,
-    temperature: 0,
-    attachments: attachments.map(({ mimeType, data: base64 }) => ({ mimeType, data: base64 })),
-  });
+  const cacheKey = extractionCacheKey(prompt, attachments);
+  let rawItems = options?.force === true ? null : database.getCachedExtraction(cacheKey);
+  const cached = rawItems !== null;
+  if (!cached) {
+    const { data } = await aivana.generateStructured({
+      feature: "extract",
+      prompt,
+      schema: extractionResultSchema,
+      system: SYSTEM_PROMPT,
+      temperature: 0,
+      webSearch: false,
+      attachments: attachments.map(({ mimeType, data: base64 }) => ({ mimeType, data: base64 })),
+    });
+    rawItems = Array.isArray(data.items) ? data.items : [];
+    database.saveCachedExtraction(cacheKey, rawItems);
+  }
 
+  // Drafts are rebuilt every time, so duplicate flags reflect what is saved now.
   const sourceFile = fileNames.join(", ").slice(0, 255) || null;
-  const rawItems = Array.isArray(data.items) ? data.items : [];
   const drafts = rawItems
     .map((raw, index) => toDraft(raw, index, { term, courseId, sourceFile }))
     .sort((a, b) => (a.dueDate || "9999").localeCompare(b.dueDate || "9999"));
 
-  return { canceled: false, files: fileNames, drafts };
+  return {
+    canceled: false,
+    cached,
+    files: fileNames,
+    // Which inputs went as text (cheap) and which as files (scanned PDFs, images, Word, CSV).
+    sentAsText: texts.map((entry) => entry.name),
+    sentAsFile: attachments.map((file) => file.name),
+    drafts,
+  };
 }
 
 // Registers the extraction channel. The renderer never sends file paths, only
@@ -274,4 +348,4 @@ function registerExtractionHandlers() {
   ipcMain.handle("extract:run", (event, options) => runExtraction(event, options));
 }
 
-module.exports = { registerExtractionHandlers, resolveWeekDate };
+module.exports = { registerExtractionHandlers, resolveWeekDate, compactText, pdfText };

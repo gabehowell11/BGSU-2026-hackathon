@@ -117,6 +117,14 @@ function openDatabase(userDataDirectory) {
       timestamp TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Saved Aivana extraction results, keyed by a hash of everything sent,
+    -- so uploading the same documents again costs no tokens.
+    CREATE TABLE IF NOT EXISTS extraction_cache (
+      cache_key TEXT PRIMARY KEY,
+      items_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_courses_term_id ON courses(term_id);
     CREATE INDEX IF NOT EXISTS idx_items_term_id ON items(term_id);
     CREATE INDEX IF NOT EXISTS idx_items_course_id ON items(course_id);
@@ -139,6 +147,7 @@ function resetSchema() {
     DROP TABLE IF EXISTS terms;
     DROP TABLE IF EXISTS usage_log;
     DROP TABLE IF EXISTS chat_messages;
+    DROP TABLE IF EXISTS extraction_cache;
     DROP TABLE IF EXISTS calendar_events;
     DROP TABLE IF EXISTS assignments;
   `);
@@ -818,6 +827,36 @@ function clearChatMessages() {
   return true;
 }
 
+const EXTRACTION_CACHE_LIMIT = 50;
+
+// Returns the saved raw extraction items for a cache key, or null.
+function getCachedExtraction(cacheKey) {
+  const row = database.prepare(`
+    SELECT items_json FROM extraction_cache WHERE cache_key = ?
+  `).get(cacheKey);
+  if (!row) return null;
+  try {
+    const items = JSON.parse(row.items_json);
+    return Array.isArray(items) ? items : null;
+  } catch {
+    return null;
+  }
+}
+
+// Saves raw extraction items under a cache key and keeps only the newest entries.
+function saveCachedExtraction(cacheKey, items) {
+  database.prepare(`
+    INSERT OR REPLACE INTO extraction_cache (cache_key, items_json, created_at)
+    VALUES (?, ?, datetime('now'))
+  `).run(cacheKey, JSON.stringify(items));
+  database.prepare(`
+    DELETE FROM extraction_cache
+    WHERE cache_key NOT IN (
+      SELECT cache_key FROM extraction_cache ORDER BY created_at DESC, rowid DESC LIMIT ?
+    )
+  `).run(EXTRACTION_CACHE_LIMIT);
+}
+
 module.exports = {
   SCHEMA_VERSION,
   openDatabase,
@@ -855,4 +894,6 @@ module.exports = {
   listRecentChatMessages,
   addChatMessage,
   clearChatMessages,
+  getCachedExtraction,
+  saveCachedExtraction,
 };
