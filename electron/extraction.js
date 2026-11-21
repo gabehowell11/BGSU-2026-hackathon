@@ -251,29 +251,23 @@ async function prepareFiles(files) {
 
     const type = ATTACHMENT_TYPES[extension];
     if (!type) {
-      throw new Error(`${name} is not a supported file. Use PDF, Word (.docx), CSV, TXT, or Markdown.`);
+      throw new Error(`${name} is not a supported file. Use PDF, Word (.docx), CSV, TXT, Markdown, or an image (PNG, JPG, WebP, GIF).`);
     }
     if (bytes.length > type.maxBytes) {
       throw new Error(`${name} is larger than ${type.maxBytes / MIB} MB.`);
     }
-    if (extension !== ".pdf") {
-      throw new Error(`${name} is an image. Upload a text-based PDF or TXT file instead.`);
-    }
+    const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
 
+    // A PDF with a real text layer is sent as text (cheaper). A scanned PDF or
+    // an image is sent as the file itself so Aivana can read the page.
     if (extension === ".pdf") {
       const extracted = await pdfText(bytes);
       if (extracted) {
-        texts.push({
-          name,
-          text: extracted.text,
-          pages: extracted.pages,
-          sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
-          fileSize: bytes.length,
-        });
+        texts.push({ name, text: extracted.text, pages: extracted.pages, sha256, fileSize: bytes.length });
         continue;
       }
-      throw new Error(`${name} appears to be scanned or has no readable text. Upload a text-based PDF or TXT file instead.`);
     }
+    attachments.push({ name, mimeType: type.mimeType, data: bytes.toString("base64"), sha256, fileSize: bytes.length });
   }
 
   if (totalBytes > MAX_TOTAL_BYTES) {
@@ -440,7 +434,7 @@ async function runExtraction(event, options = {}) {
   if (documentText.length > MAX_TEXT_CHARS) {
     throw new Error("The text is too long. Split it into smaller pieces.");
   }
-  if (!containsLikelyDate(documentText)) {
+  if (attachments.length === 0 && !containsLikelyDate(documentText)) {
     return {
       canceled: false,
       noDates: true,
@@ -466,17 +460,31 @@ async function runExtraction(event, options = {}) {
       `Term: ${term.name}, ${term.start_date} to ${term.end_date}.`,
       course ? `Course: ${course.code} ${course.name}.` : "Course: not specified.",
     ];
-  const documentChunks = splitDocumentText(documentText);
-  const prompts = documentChunks.map((chunk, index) => [
-    ...context,
-    `Document chunk ${index + 1} of ${documentChunks.length}.`,
-    "List every dated item in this chunk. Do not invent items or dates.",
-    `\n${chunk}`,
-  ].join("\n"));
+  const documentChunks = documentText ? splitDocumentText(documentText) : [];
+  const prompts = documentChunks.map((chunk, index) => ({
+    text: [
+      ...context,
+      `Document chunk ${index + 1} of ${documentChunks.length}.`,
+      "List every dated item in this chunk. Do not invent items or dates.",
+      `\n${chunk}`,
+    ].join("\n"),
+    files: [],
+  }));
+  // Images and scanned pages go in one request with the files attached.
+  if (attachments.length) {
+    prompts.push({
+      text: [
+        ...context,
+        `Attached: ${attachments.map((file) => file.name).join(", ")}.`,
+        "These are photos or scanned pages. Read them carefully and list every dated item. Do not invent items or dates.",
+      ].join("\n"),
+      files: attachments.map(({ mimeType, data }) => ({ mimeType, data })),
+    });
+  }
 
   const cacheKey = extractionCacheKey(
     `${setupMode ? "setup" : "normal"}\n${context.join("\n")}\n${documentText}`,
-    [],
+    attachments,
   );
   let result = options?.force === true ? null : database.getCachedExtraction(cacheKey);
   if (Array.isArray(result)) result = { items: result };
@@ -486,7 +494,7 @@ async function runExtraction(event, options = {}) {
     let suggestedTerm = null;
     let suggestedCourse = null;
 
-    for (const prompt of prompts) {
+    for (const { text: prompt, files: promptFiles } of prompts) {
       if (prompt.length > 20000) {
         throw new Error("Document text could not be split small enough for Aivana.");
       }
@@ -497,7 +505,7 @@ async function runExtraction(event, options = {}) {
         system: SYSTEM_PROMPT,
         temperature: 0,
         webSearch: false,
-        attachments: [],
+        attachments: promptFiles,
       });
       extractedItems.push(...(Array.isArray(data.items) ? data.items : []));
       if (setupMode) {
@@ -542,6 +550,18 @@ async function runExtraction(event, options = {}) {
       plaintext: entry.text,
       sha256: entry.sha256,
       draftCount: drafts.length,
+      sentAs: "text",
+    });
+  }
+  for (const file of attachments) {
+    database.saveUploadedFile({
+      name: file.name,
+      mimeType: file.mimeType,
+      fileSize: file.fileSize,
+      plaintext: "",
+      sha256: file.sha256,
+      draftCount: drafts.length,
+      sentAs: "file",
     });
   }
 

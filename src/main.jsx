@@ -5,6 +5,7 @@ import CalendarPage from "./pages/CalendarPage";
 import HomePage from "./pages/HomePage";
 import AssistantPage from "./pages/AssistantPage";
 import FilesPage from "./pages/FilesPage";
+import SettingsPage from "./pages/SettingsPage";
 import Sidebar from "./components/Sidebar";
 import "@fontsource-variable/jetbrains-mono";
 import "./styles.css";
@@ -26,21 +27,24 @@ function App() {
   const [items, setItems] = useState([]);
   const [databaseError, setDatabaseError] = useState("");
 
+  // Reloads terms, classes and items, e.g. after Settings changes them.
+  async function reloadData() {
+    const [nextTerms, nextCourses, nextItems] = await Promise.all([
+      window.database.listTerms(),
+      window.database.listCourses(),
+      window.database.listItems(),
+    ]);
+    setTerms(nextTerms);
+    setCourses(nextCourses);
+    setItems(nextItems);
+  }
+
   useEffect(() => {
     if (!window.database) {
       setDatabaseError("Electron database unavailable.");
       return;
     }
-
-    Promise.all([
-      window.database.listTerms(),
-      window.database.listCourses(),
-      window.database.listItems(),
-    ]).then(([nextTerms, nextCourses, nextItems]) => {
-      setTerms(nextTerms);
-      setCourses(nextCourses);
-      setItems(nextItems);
-    }).catch((error) => setDatabaseError(error.message));
+    reloadData().catch((error) => setDatabaseError(error.message));
   }, []);
 
   return (
@@ -97,7 +101,8 @@ function App() {
             setItems={setItems}
           />
         )}
-        {page !== "home" && page !== "assignments" && page !== "calendar" && page !== "chat" && page !== "files" && <PlaceholderPage page={page} />}
+        {page === "settings" && <SettingsPage terms={terms} courses={courses} onDataChanged={reloadData} />}
+        {!["home", "assignments", "calendar", "chat", "files", "settings"].includes(page) && <PlaceholderPage page={page} />}
         </main>
       </div>
     </div>
