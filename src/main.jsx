@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import Calendar from "./Calendar.jsx";
 import "./styles.css";
 
 const EMPTY_TERM = { name: "", startDate: "", endDate: "" };
@@ -123,6 +124,8 @@ function App() {
       <h1>AI Student Task Manager</h1>
 
       {databaseError && <p role="alert" className="error">{databaseError}</p>}
+
+      <Calendar items={items} />
 
       <section>
         <h2>Term</h2>
