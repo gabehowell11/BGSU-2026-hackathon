@@ -1,14 +1,25 @@
 const { ipcMain } = require("electron");
 const database = require("./database");
 const aivana = require("./aivana");
-const { requiredId, optionalId, itemIds } = require("./validation");
+const { registerExtractionHandlers } = require("./extraction");
+const { registerChatHandlers } = require("./chat");
+const { registerIcsHandlers } = require("./ics");
+const { requiredId, requiredIds, optionalId, itemFilter, itemIds } = require("./validation");
 
 // Add new channels in the feature file (registerExtractionHandlers in
 // extraction.js, and so on) and call that function from here. Do not add
 // handlers in main.js.
 function registerIpcHandlers() {
-  // Smoke test. Delete aivana:generate when extract:run and chat:send exist.
+  // Smoke test still used by the current test page. Delete it once the page
+  // uses extract:run and chat:send instead.
   ipcMain.handle("aivana:generate", (_event, prompt) => aivana.generate(prompt));
+
+  // extract:run
+  registerExtractionHandlers();
+  // chat:send, chat:apply-actions
+  registerChatHandlers();
+  // export:ics
+  registerIcsHandlers();
 
   // Returns every saved term.
   ipcMain.handle("terms:list", () => database.listTerms());
@@ -40,18 +51,15 @@ function registerIpcHandlers() {
     return database.deleteCourse(requiredId(id, "course"));
   });
 
-  // Returns items, optionally limited to one term.
-  ipcMain.handle("items:list", (_event, filter) => {
-    const next = { ...(filter || {}) };
-    if (next.termId !== undefined && next.termId !== null && next.termId !== "") {
-      next.termId = requiredId(next.termId, "term");
-    } else {
-      delete next.termId;
-    }
-    return database.listItems(next);
+  // Returns items. Optional filter keys: termId, courseId, status, type,
+  // priority, verified (true/false), search (matches title or notes).
+  ipcMain.handle("items:list", (_event, filter) => database.listItems(itemFilter(filter)));
+  // Returns items due between two dates, with the same optional filter.
+  ipcMain.handle("items:list-range", (_event, from, to, filter) => {
+    return database.listItemsInRange(from, to, itemFilter(filter));
   });
-  // Returns items due between two dates.
-  ipcMain.handle("items:list-range", (_event, from, to) => database.listItemsInRange(from, to));
+  // Returns the home page summary: due today, next 7 days, overdue, recently completed.
+  ipcMain.handle("items:summary", (_event, today) => database.getSummary(today || undefined));
   // Saves one item.
   ipcMain.handle("items:create", (_event, item) => database.createItem({
     ...itemIds(item),
@@ -69,6 +77,10 @@ function registerIpcHandlers() {
   ipcMain.handle("items:update", (_event, id, item) => {
     return database.updateItem(requiredId(id, "item"), itemIds(item));
   });
+  // Applies one patch to many items in one transaction (bulk edit).
+  ipcMain.handle("items:update-many", (_event, ids, patch) => {
+    return database.updateItems(requiredIds(ids, "item"), itemIds(patch));
+  });
   // Changes one item's status.
   ipcMain.handle("items:set-status", (_event, id, status) => {
     return database.setItemStatus(requiredId(id, "item"), status);
@@ -81,11 +93,15 @@ function registerIpcHandlers() {
   ));
   // Deletes one item.
   ipcMain.handle("items:delete", (_event, id) => database.deleteItem(requiredId(id, "item")));
+  // Deletes many items in one transaction and returns how many were deleted.
+  ipcMain.handle("items:delete-many", (_event, ids) => {
+    return database.deleteItems(requiredIds(ids, "item"));
+  });
 
   // Returns recorded Aivana usage, newest first. Writes happen inside aivana.js.
   ipcMain.handle("usage:list", () => database.listUsage());
 
-  // Returns the full saved chat. Writes happen inside the future chat handler.
+  // Returns the full saved chat. Writes happen inside chat.js.
   ipcMain.handle("chat:list", () => database.listChatMessages());
   // Returns at most the last 8 chat messages.
   ipcMain.handle("chat:recent", () => database.listRecentChatMessages());
