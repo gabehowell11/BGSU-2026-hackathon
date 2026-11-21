@@ -31,7 +31,7 @@ const {
 } = require("./validation");
 
 // Bump this when the CREATE TABLE statements change. An older local file is
-// dropped and recreated (run `npm run seed` again afterwards).
+// dropped and recreated, which deletes its data.
 // CREATE TABLE IF NOT EXISTS does not add new columns.
 const SCHEMA_VERSION = 2;
 const DEFAULT_COURSE_COLOR = "#3157c8";
@@ -155,7 +155,6 @@ function openDatabase(userDataDirectory) {
     CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages(timestamp);
   `);
   ensureItemMetadataColumns();
-  ensureStarterWorkspace();
   database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 
   return databasePath;
@@ -202,31 +201,6 @@ function ensureItemMetadataColumns() {
       database.exec(`ALTER TABLE items ADD COLUMN ${name} ${definition}`);
     }
   }
-}
-
-// Creates a first-run workspace so the UI always has a term and selectable classes.
-function ensureStarterWorkspace() {
-  const existingTerm = database.prepare("SELECT id FROM terms ORDER BY id ASC LIMIT 1").get();
-  if (existingTerm) return;
-
-  const termResult = database.prepare(`
-    INSERT INTO terms (name, start_date, end_date)
-    VALUES (?, ?, ?)
-  `).run("Fall 2026", "2026-08-24", "2026-12-11");
-  const termId = insertId(termResult);
-
-  database.prepare(`
-    INSERT INTO courses (code, name, color, term_id)
-    VALUES (?, ?, ?, ?)
-  `).run("CS 3350", "Operating Systems", "#668cff", termId);
-  database.prepare(`
-    INSERT INTO courses (code, name, color, term_id)
-    VALUES (?, ?, ?, ?)
-  `).run("CS 3010", "Data Structures", "#bd86ff", termId);
-  database.prepare(`
-    INSERT INTO courses (code, name, color, term_id)
-    VALUES (?, ?, ?, ?)
-  `).run("MATH 3320", "Discrete Math", "#55b8a3", termId);
 }
 
 // Converts a SQLite insert id into a normal number.

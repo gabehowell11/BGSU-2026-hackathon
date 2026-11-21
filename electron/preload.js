@@ -11,8 +11,6 @@ contextBridge.exposeInMainWorld("profile", {
 });
 
 contextBridge.exposeInMainWorld("aivana", {
-  // Sends a prompt to the main process and returns Aivana's answer (smoke test).
-  generate: (prompt) => ipcRenderer.invoke("aivana:generate", prompt),
   // Reads a syllabus, schedule, or photo and returns unsaved drafts to review.
   // options: { termId?, courseId?, files?: [{ name, data }], text?, force? }. With no
   // files and no text, a file picker opens. Returns { canceled, cached, files,

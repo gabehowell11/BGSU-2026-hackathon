@@ -173,26 +173,8 @@ async function streamText({ feature, prompt = null, onDelta, ...options }) {
   }
 }
 
-// Smoke-test call used by the current test page. maxTokens is 50 on purpose.
-async function generate(prompt) {
-  if (!prompt || typeof prompt !== "string") {
-    throw new Error("A prompt is required.");
-  }
-
-  const aivana = await getClient();
-  let response;
-  try {
-    response = await aivana.generate(prompt, { maxTokens: 50 });
-  } catch (error) {
-    throw friendlyError(error);
-  }
-  logResponseUsage("chat", response);
-  return response.answer;
-}
-
 module.exports = {
   getClient,
-  generate,
   generateStructured,
   generateText,
   streamText,

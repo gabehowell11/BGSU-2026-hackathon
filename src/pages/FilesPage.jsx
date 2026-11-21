@@ -53,6 +53,11 @@ export default function FilesPage({ terms, courses, setItems }) {
   }
 
   async function uploadFile() {
+    // Items are saved under a term, so a scan without one could not be saved.
+    if (!termId) {
+      setError("Add a term on the Settings page before uploading a file.");
+      return;
+    }
     setLoading(true);
     setError("");
     setResultMessage("");

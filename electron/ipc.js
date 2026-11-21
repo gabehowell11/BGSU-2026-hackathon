@@ -1,6 +1,5 @@
 const { ipcMain } = require("electron");
 const database = require("./database");
-const aivana = require("./aivana");
 const { registerExtractionHandlers } = require("./extraction");
 const { registerChatHandlers } = require("./chat");
 const { registerIcsHandlers } = require("./ics");
@@ -10,10 +9,6 @@ const { requiredId, requiredIds, optionalId, itemFilter, itemIds } = require("./
 // extraction.js, and so on) and call that function from here. Do not add
 // handlers in main.js.
 function registerIpcHandlers() {
-  // Smoke test still used by the current test page. Delete it once the page
-  // uses extract:run and chat:send instead.
-  ipcMain.handle("aivana:generate", (_event, prompt) => aivana.generate(prompt));
-
   // extract:run
   registerExtractionHandlers();
   // chat:send, chat:apply-actions

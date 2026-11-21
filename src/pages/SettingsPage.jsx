@@ -161,7 +161,7 @@ export default function SettingsPage({ terms, courses, onDataChanged }) {
               </span>
             </form>
           )}
-          {!terms.length && !termForm && <p className="settings-empty">No terms yet. Add one, or upload a syllabus on the Files page.</p>}
+          {!terms.length && !termForm && <p className="settings-empty">No terms yet. Add one to get started.</p>}
         </div>
       </section>
 
