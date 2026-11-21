@@ -39,6 +39,17 @@ contextBridge.exposeInMainWorld("aivana", {
   // Sends a chat message. Returns { reply, actions, rejected, messages }.
   // Nothing changes until confirmed actions go to applyChatActions.
   chat: (content) => ipcRenderer.invoke("chat:send", content),
+  // Same as chat, but calls onDelta(text) with each piece of the reply as it
+  // streams in. Resolves with { reply, actions, rejected, messages } when done.
+  chatStream: (content, onDelta) => {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const listener = (_event, payload) => {
+      if (payload?.requestId === requestId && typeof onDelta === "function") onDelta(payload.text);
+    };
+    ipcRenderer.on("chat:delta", listener);
+    return ipcRenderer.invoke("chat:stream", requestId, content)
+      .finally(() => ipcRenderer.removeListener("chat:delta", listener));
+  },
   // Applies the chat actions the user confirmed, all or nothing.
   applyChatActions: (actions) => ipcRenderer.invoke("chat:apply-actions", actions),
 });

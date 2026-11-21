@@ -116,6 +116,34 @@ function friendlyError(error) {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+// Streams a plain-text answer. Calls onDelta(text) for each piece as it
+// arrives and resolves with the full text. A temporary failure is retried only
+// before anything has been shown, so the user never sees text repeated.
+async function streamText({ feature, prompt = null, onDelta, ...options }) {
+  const aivana = await getClient();
+  for (let attempt = 0; ; attempt += 1) {
+    let full = "";
+    try {
+      for await (const chunk of aivana.generateStream(prompt, options)) {
+        if (chunk.event === "delta" && typeof chunk.data?.text === "string") {
+          full += chunk.data.text;
+          onDelta?.(chunk.data.text);
+        } else if (chunk.event === "done") {
+          logResponseUsage(feature, chunk.data?.usage ? chunk.data : { usage: chunk.data });
+        } else if (chunk.event === "error") {
+          const streamError = new Error(chunk.data?.message || "Aivana had a temporary problem. Try again.");
+          streamError.code = chunk.data?.code || "upstream_error";
+          throw streamError;
+        }
+      }
+      return full;
+    } catch (error) {
+      if (full || attempt >= 2 || !isTemporaryError(error)) throw friendlyError(error);
+      await new Promise((resolve) => setTimeout(resolve, 750 * (attempt + 1)));
+    }
+  }
+}
+
 // Smoke-test call used by the current test page. maxTokens is 50 on purpose.
 async function generate(prompt) {
   if (!prompt || typeof prompt !== "string") {
@@ -137,6 +165,7 @@ module.exports = {
   getClient,
   generate,
   generateStructured,
+  streamText,
   friendlyError,
   logResponseUsage,
 };

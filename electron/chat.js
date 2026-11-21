@@ -78,6 +78,50 @@ function plannerContext(today) {
   ].join("\n");
 }
 
+// Streaming replies are plain text, so proposed changes come after a marker
+// line as a JSON array. The marker and JSON are never shown to the student.
+const ACTIONS_MARKER = "@@ACTIONS@@";
+
+const STREAM_SYSTEM_PROMPT = `You are Aivana, the assistant inside a student task manager. You help the student plan, prioritize, and manage assignments, quizzes, exams, projects, holidays, and study blocks.
+Rules:
+- Answer the student first, in plain text: friendly and concise. No markdown tables or headings.
+- When the student asks to add, change, complete, reschedule, or delete items, finish your answer, then write a new line with exactly ${ACTIONS_MARKER} followed by a JSON array of actions, and write nothing after the array. Never write the marker when nothing should change.
+- Each action is {"op": "create" | "update" | "delete", "summary": "one line", "item_id": number, "fields": {...}}.
+- create: "fields" must include title, and should include due_date and course_id when known. No item_id.
+- update: "item_id" plus only the fields that change. Mark something complete with status "done".
+- delete: "item_id" only.
+- Allowed fields: title, type, due_date, due_time, course_id, status, priority, notes, estimated_minutes, weight_pct.
+- Never say a change is already done: the app asks the student to confirm every change first. Tell them to confirm.
+- Use only item ids (#) and course ids from the planner data in the latest message. If it is unclear which item the student means, ask, and propose nothing.
+- Dates are YYYY-MM-DD and times are 24-hour HH:MM. Work out relative dates such as "next Friday" from today's date in the planner data.`;
+
+// Number of trailing characters that could be the start of the marker, so a
+// half-received marker is held back instead of flashing on screen.
+function markerPrefixLength(text) {
+  for (let length = Math.min(text.length, ACTIONS_MARKER.length - 1); length > 0; length -= 1) {
+    if (ACTIONS_MARKER.startsWith(text.slice(-length))) return length;
+  }
+  return 0;
+}
+
+// Splits a finished streamed answer into the visible reply and the raw actions.
+function parseStreamedReply(full) {
+  const index = full.indexOf(ACTIONS_MARKER);
+  if (index < 0) return { reply: full.trim(), rawActions: [], unreadable: false };
+  const reply = full.slice(0, index).trim();
+  const json = full.slice(index + ACTIONS_MARKER.length).trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```\s*$/, "")
+    .trim();
+  try {
+    const parsed = JSON.parse(json);
+    const rawActions = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.actions) ? parsed.actions : [];
+    return { reply, rawActions, unreadable: false };
+  } catch {
+    return { reply, rawActions: [], unreadable: true };
+  }
+}
+
 // Cuts an older chat turn down before it is re-sent as history.
 function shorten(text) {
   return text.length > HISTORY_MESSAGE_CHARS ? `${text.slice(0, HISTORY_MESSAGE_CHARS)}…` : text;
@@ -139,10 +183,8 @@ function normalizeAction(raw, actionId, currentTerm) {
   };
 }
 
-// Sends one message with recent history and the planner snapshot. Returns
-// Aivana's reply and proposed actions. Nothing in the planner changes until
-// the renderer passes confirmed actions to chat:apply-actions.
-async function sendMessage(content) {
+// Checks the message and builds what is sent: recent history plus the planner snapshot.
+function prepareTurn(content) {
   const text = blankToNull(content);
   if (!text) throw new Error("Type a message first.");
   if (text.length > MAX_MESSAGE_CHARS) {
@@ -156,6 +198,66 @@ async function sendMessage(content) {
     ...history,
     { role: "user", content: `${text}\n\n--- Planner data (for reference) ---\n${plannerContext(today)}` },
   ];
+  return { text, today, messages };
+}
+
+// Validates proposed actions and saves both turns. Saving only after Aivana
+// answered means a failed call leaves no orphan message.
+function finishTurn({ text, today, reply, rawActions, unreadable = false }) {
+  const currentTerm = database.getCurrentTerm(today);
+  const actions = [];
+  const rejected = [];
+  (Array.isArray(rawActions) ? rawActions : []).forEach((raw) => {
+    const result = normalizeAction(raw, actions.length + 1, currentTerm);
+    if (result.action) actions.push(result.action);
+    else rejected.push(result.rejected);
+  });
+  if (unreadable) {
+    rejected.push({ summary: "Proposed changes", reason: "The assistant's changes could not be read. Ask again." });
+  }
+
+  const saved = database.transaction(() => ({
+    user: database.addChatMessage({ role: "user", content: text }),
+    assistant: database.addChatMessage({ role: "assistant", content: reply }),
+  }));
+  return { reply, actions, rejected, messages: saved };
+}
+
+// Streams one reply. Visible text goes to the renderer as "chat:delta" events
+// tagged with requestId; the resolved value matches chat:send.
+async function streamMessage(event, requestId, content) {
+  const { text, today, messages } = prepareTurn(content);
+  let full = "";
+  let shown = 0;
+
+  await aivana.streamText({
+    feature: "chat",
+    system: STREAM_SYSTEM_PROMPT,
+    assistantName: "Aivana",
+    messages,
+    maxTokens: REPLY_MAX_TOKENS,
+    webSearch: false,
+    onDelta: (piece) => {
+      full += piece;
+      const markerAt = full.indexOf(ACTIONS_MARKER);
+      const visibleEnd = markerAt >= 0 ? markerAt : full.length - markerPrefixLength(full);
+      if (visibleEnd > shown && !event.sender.isDestroyed()) {
+        event.sender.send("chat:delta", { requestId, text: full.slice(shown, visibleEnd) });
+        shown = visibleEnd;
+      }
+    },
+  });
+
+  const parsed = parseStreamedReply(full);
+  const reply = parsed.reply || "Sorry, I could not come up with an answer. Try rephrasing.";
+  return finishTurn({ text, today, reply, rawActions: parsed.rawActions, unreadable: parsed.unreadable });
+}
+
+// Sends one message and waits for the whole reply. Returns Aivana's reply and
+// proposed actions. Nothing in the planner changes until the renderer passes
+// confirmed actions to chat:apply-actions.
+async function sendMessage(content) {
+  const { text, today, messages } = prepareTurn(content);
 
   const { data } = await aivana.generateStructured({
     feature: "chat",
@@ -169,22 +271,7 @@ async function sendMessage(content) {
   });
 
   const reply = blankToNull(data.reply) || "Sorry, I could not come up with an answer. Try rephrasing.";
-  const currentTerm = database.getCurrentTerm(today);
-  const actions = [];
-  const rejected = [];
-  (Array.isArray(data.actions) ? data.actions : []).forEach((raw) => {
-    const result = normalizeAction(raw, actions.length + 1, currentTerm);
-    if (result.action) actions.push(result.action);
-    else rejected.push(result.rejected);
-  });
-
-  // Save both turns only after Aivana answered, so a failed call leaves no orphan message.
-  const saved = database.transaction(() => ({
-    user: database.addChatMessage({ role: "user", content: text }),
-    assistant: database.addChatMessage({ role: "assistant", content: reply }),
-  }));
-
-  return { reply, actions, rejected, messages: saved };
+  return finishTurn({ text, today, reply, rawActions: data.actions });
 }
 
 // Applies the actions the user confirmed, all in one transaction. Each action
@@ -211,10 +298,11 @@ function applyActions(actions) {
   }));
 }
 
-// Registers chat:send and chat:apply-actions. Reading and clearing history stay in ipc.js.
+// Registers chat:send, chat:stream and chat:apply-actions. Reading and clearing history stay in ipc.js.
 function registerChatHandlers() {
   ipcMain.handle("chat:send", (_event, content) => sendMessage(content));
+  ipcMain.handle("chat:stream", (event, requestId, content) => streamMessage(event, String(requestId), content));
   ipcMain.handle("chat:apply-actions", (_event, actions) => applyActions(actions));
 }
 
-module.exports = { registerChatHandlers };
+module.exports = { registerChatHandlers, parseStreamedReply, markerPrefixLength };

@@ -7,6 +7,13 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Plain label for how a file was read.
+function fileKind(file) {
+  if (file.mime_type?.startsWith("image/")) return "Image";
+  if (file.mime_type === "application/pdf") return file.sent_as === "file" ? "Scanned PDF" : "PDF";
+  return "Text";
+}
+
 function formatDateTime(value) {
   if (!value) return "";
   return new Date(`${value.replace(" ", "T")}Z`).toLocaleString();
@@ -169,6 +176,8 @@ export default function FilesPage({ terms, courses, setItems }) {
       {error && <div className="database-error" role="alert">{error}</div>}
       {resultMessage && <div className="files-result">{resultMessage}</div>}
 
+      <p className="file-hint">PDF, Word, TXT, CSV, or photos and scans of handouts. Up to 5 files at a time.</p>
+
       <section className="file-controls">
         <label>
           <span>Term</span>
@@ -207,7 +216,7 @@ export default function FilesPage({ terms, courses, setItems }) {
               <span className="file-icon"><Icon name="folder" size={16} /></span>
               <div>
                 <strong>{file.name}</strong>
-                <small>{file.mime_type === "application/pdf" ? "PDF" : "Text"}{file.file_size ? `, ${formatSize(file.file_size)}` : ""}</small>
+                <small>{fileKind(file)}{file.file_size ? `, ${formatSize(file.file_size)}` : ""}</small>
               </div>
             </div>
             <span>{formatDateTime(file.created_at)}</span>

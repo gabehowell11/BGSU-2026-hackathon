@@ -8,6 +8,7 @@ export default function AssistantPage({ setItems }) {
   const [rejectedActions, setRejectedActions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [streamText, setStreamText] = useState(null);
   const scrollRef = useRef(null);
 
   async function refreshHistory() {
@@ -26,6 +27,10 @@ export default function AssistantPage({ setItems }) {
     });
   }, [messages, pendingActions, loading]);
 
+  useEffect(() => {
+    if (streamText) scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+  }, [streamText]);
+
   async function send(event) {
     event.preventDefault();
     const content = input.trim();
@@ -43,10 +48,19 @@ export default function AssistantPage({ setItems }) {
     setError("");
     setPendingActions([]);
     setRejectedActions([]);
+    setStreamText("");
 
     try {
-      if (!window.aivana?.chat) throw new Error("The assistant API is unavailable.");
-      const response = await window.aivana.chat(content);
+      let response;
+      if (window.aivana?.chatStream) {
+        response = await window.aivana.chatStream(content, (piece) => {
+          setStreamText((current) => (current || "") + piece);
+        });
+      } else if (window.aivana?.chat) {
+        response = await window.aivana.chat(content);
+      } else {
+        throw new Error("The assistant API is unavailable.");
+      }
       setMessages(await window.database.listChatMessages());
       setPendingActions(response.actions || []);
       setRejectedActions(response.rejected || []);
@@ -55,6 +69,7 @@ export default function AssistantPage({ setItems }) {
       setInput(content);
       setError(nextError.message || "The assistant could not respond.");
     } finally {
+      setStreamText(null);
       setLoading(false);
     }
   }
@@ -153,10 +168,12 @@ export default function AssistantPage({ setItems }) {
               </div>
             )}
 
-            {loading && (
-              <div className="chat-message assistant">
+            {loading && streamText !== null && (
+              <div className="chat-message assistant streaming" aria-live="polite">
                 <span className="chat-role">Assistant</span>
-                <p className="chat-loading"><span /><span /><span /></p>
+                {streamText.trim()
+                  ? <p>{streamText.trimStart()}<span className="chat-caret" aria-hidden="true" /></p>
+                  : <p className="chat-loading"><span /><span /><span /></p>}
               </div>
             )}
           </div>

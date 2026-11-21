@@ -942,12 +942,13 @@ function saveUploadedFile(file) {
     if (existing) {
       database.prepare(`
         UPDATE uploaded_files
-        SET name = ?, plaintext = ?, draft_count = ?, created_at = datetime('now')
+        SET name = ?, plaintext = ?, draft_count = ?, sent_as = ?, created_at = datetime('now')
         WHERE id = ?
       `).run(
         String(file.name).slice(0, 255),
         String(file.plaintext || "").slice(0, 400000),
         Number(file.draftCount || 0),
+        file.sentAs === "file" ? "file" : "text",
         existing.id,
       );
       return database.prepare(
@@ -959,7 +960,7 @@ function saveUploadedFile(file) {
     INSERT INTO uploaded_files (
       name, mime_type, file_size, stored_path, plaintext, sha256,
       draft_count, sent_as
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'text')
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     String(file.name).slice(0, 255),
     file.mimeType || null,
@@ -968,6 +969,7 @@ function saveUploadedFile(file) {
     String(file.plaintext || "").slice(0, 400000),
     file.sha256 || null,
     Number(file.draftCount || 0),
+    file.sentAs === "file" ? "file" : "text",
   );
   return database.prepare(
     "SELECT * FROM uploaded_files WHERE id = ?",

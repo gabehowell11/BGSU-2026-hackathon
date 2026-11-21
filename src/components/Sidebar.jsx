@@ -27,7 +27,7 @@ export default function Sidebar({ collapsed, setCollapsed, page, setPage, course
           <div className="sidebar-section">
             <span className="sidebar-label">Workspace</span>
             <button type="button" className={page === "files" ? "active" : ""} onClick={() => setPage("files")}><Icon name="folder" /><span>Files</span></button>
-            <button type="button"><Icon name="settings" /><span>Settings</span></button>
+            <button type="button" className={page === "settings" ? "active" : ""} onClick={() => setPage("settings")}><Icon name="settings" /><span>Settings</span></button>
           </div>
           <div className="recent">
             <span className="sidebar-label">Recent classes</span>
@@ -37,7 +37,7 @@ export default function Sidebar({ collapsed, setCollapsed, page, setPage, course
           </div>
         </>
       )}
-      <button className="profile" type="button" title="Profile"><span className="avatar"><Icon name="user" size={16} /></span>{!collapsed && <><span className="profile-name">Profile</span><Icon name="more" /></>}</button>
+      <button className="profile" type="button" title="Settings" onClick={() => setPage("settings")}><span className="avatar"><Icon name="user" size={16} /></span>{!collapsed && <><span className="profile-name">Profile</span><Icon name="more" /></>}</button>
     </aside>
   );
 }
