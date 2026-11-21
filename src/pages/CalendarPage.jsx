@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import AssignmentDrawer from "../components/AssignmentDrawer";
 import Icon from "../components/Icon";
+import { urgencyColor } from "../urgency";
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -139,9 +140,9 @@ export default function CalendarPage({ items, courses, terms, setItems }) {
 
       <div className="calendar-controls">
         <div className="calendar-nav">
-          <button type="button" className="icon-button" onClick={() => move(-1)} aria-label="Previous">‹</button>
+          <button type="button" className="icon-button prev" onClick={() => move(-1)} aria-label="Previous"><Icon name="chevron" /></button>
           <button type="button" className="secondary-button" onClick={() => setVisibleDate(new Date())}>Today</button>
-          <button type="button" className="icon-button" onClick={() => move(1)} aria-label="Next">›</button>
+          <button type="button" className="icon-button" onClick={() => move(1)} aria-label="Next"><Icon name="chevron" /></button>
           <h2>{title}</h2>
         </div>
         <div className="view-switch" aria-label="Calendar view">
@@ -173,7 +174,7 @@ export default function CalendarPage({ items, courses, terms, setItems }) {
                   <span className="calendar-date">{date.getDate()}</span>
                   <span className="calendar-day-items">
                     {dayItems.slice(0, 3).map((item) => (
-                      <span key={item.id} className="calendar-item" style={{ borderLeftColor: item.course_color || "#668cff" }} onClick={(event) => { event.stopPropagation(); openEdit(item); }}>
+                      <span key={item.id} className="calendar-item" style={{ borderLeftColor: urgencyColor(item) }} onClick={(event) => { event.stopPropagation(); openEdit(item); }}>
                         {item.due_time && <small>{item.due_time}</small>}<b>{item.title}</b>
                       </span>
                     ))}
@@ -198,7 +199,7 @@ export default function CalendarPage({ items, courses, terms, setItems }) {
                 </button>
                 <div className="week-events">
                   {dayItems.map((item) => (
-                    <button type="button" key={item.id} className="week-event" style={{ borderLeftColor: item.course_color || "#668cff" }} onClick={() => openEdit(item)}>
+                    <button type="button" key={item.id} className="week-event" style={{ borderLeftColor: urgencyColor(item) }} onClick={() => openEdit(item)}>
                       {item.due_time && <small>{item.due_time}</small>}<strong>{item.title}</strong><span>{item.course_code || item.type}</span>
                     </button>
                   ))}
@@ -216,7 +217,7 @@ export default function CalendarPage({ items, courses, terms, setItems }) {
             {(itemsByDate.get(isoDate(visibleDate)) || []).sort((a, b) => (a.due_time || "23:59").localeCompare(b.due_time || "23:59")).map((item) => (
               <button type="button" className="day-event" key={item.id} onClick={() => openEdit(item)}>
                 <span className="day-time">{item.due_time || "All day"}</span>
-                <span className="day-event-line" style={{ background: item.course_color || "#668cff" }} />
+                <span className="day-event-line" style={{ background: urgencyColor(item) }} />
                 <span className="day-event-main"><strong>{item.title}</strong><small>{item.course_code || item.type}{item.notes ? ` · ${item.notes}` : ""}</small></span>
                 <span className={`status status-${item.status}`}><span />{item.status === "done" ? "Done" : item.status === "in_progress" ? "In progress" : "To do"}</span>
               </button>

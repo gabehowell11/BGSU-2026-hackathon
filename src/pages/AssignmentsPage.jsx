@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-table";
 import AssignmentDrawer from "../components/AssignmentDrawer";
 import Icon from "../components/Icon";
+import { urgency, urgencyColor } from "../urgency";
 
 const STATUS_LABELS = {
   todo: "To do",
@@ -58,7 +59,7 @@ export default function AssignmentsPage({ items, courses, terms, setItems }) {
       header: "Assignment",
       cell: ({ row }) => (
         <button className="assignment-name" type="button" onClick={() => openEdit(row.original)}>
-          <span className="type-mark" style={{ background: row.original.course_color || "#668cff" }} />
+          <span className="type-mark" style={{ background: urgencyColor(row.original) }} />
           <span>
             <strong>{row.original.title}</strong>
             {(row.original.weight_pct || row.original.estimated_minutes || row.original.notes) && (
@@ -77,7 +78,7 @@ export default function AssignmentsPage({ items, courses, terms, setItems }) {
       header: "Class",
       cell: ({ row }) => (
         <span className="course-cell">
-          <span className="course-dot" style={{ background: row.original.course_color || "#668cff" }} />
+          <span className="course-dot" style={{ background: row.original.course_color || "#4a8fe7" }} />
           {row.original.course_code || "No class"}
         </span>
       ),
@@ -86,7 +87,7 @@ export default function AssignmentsPage({ items, courses, terms, setItems }) {
       accessorKey: "due_date",
       header: "Due date",
       cell: ({ row }) => (
-        <span className="due-cell">
+        <span className={`due-cell u-${urgency(row.original)}`}>
           {formatDate(row.original.due_date)}
           {row.original.due_time && <small>{row.original.due_time}</small>}
         </span>

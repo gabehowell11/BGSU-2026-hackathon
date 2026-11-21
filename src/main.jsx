@@ -5,6 +5,7 @@ import CalendarPage from "./pages/CalendarPage";
 import HomePage from "./pages/HomePage";
 import AssistantPage from "./pages/AssistantPage";
 import Sidebar from "./components/Sidebar";
+import "@fontsource-variable/jetbrains-mono";
 import "./styles.css";
 
 function PlaceholderPage({ page }) {
@@ -19,20 +20,12 @@ function PlaceholderPage({ page }) {
 function App() {
   const [page, setPage] = useState("assignments");
   const [collapsed, setCollapsed] = useState(false);
-  const [profileName, setProfileName] = useState("Student");
   const [terms, setTerms] = useState([]);
   const [courses, setCourses] = useState([]);
   const [items, setItems] = useState([]);
   const [databaseError, setDatabaseError] = useState("");
 
   useEffect(() => {
-    Promise.all([
-      window.profile?.get?.(),
-      window.settings?.get?.(),
-    ]).then(([profile, appSettings]) => {
-      setProfileName(appSettings?.userName || profile?.systemName || "Student");
-    }).catch(() => {});
-
     if (!window.database) {
       setDatabaseError("Electron database unavailable.");
       return;
@@ -52,7 +45,7 @@ function App() {
   return (
     <div className="window-shell">
       <header className="window-titlebar">
-        <div className="window-title"><span className="window-mark">A</span><span>AI Student Task Manager</span></div>
+        <div className="window-title"><span className="window-mark">D</span><span>Deadline</span></div>
         <div className="window-controls">
           <button type="button" onClick={() => window.appWindow?.minimize()} aria-label="Minimize"><span className="control-minimize" /></button>
           <button type="button" onClick={() => window.appWindow?.maximize()} aria-label="Maximize"><span className="control-maximize" /></button>
@@ -66,7 +59,6 @@ function App() {
           page={page}
           setPage={setPage}
           courses={courses}
-          profileName={profileName}
         />
         <main className={`main-content${page === "chat" ? " assistant-main" : ""}`}>
         {databaseError && <div className="database-error" role="alert">{databaseError}</div>}
@@ -77,6 +69,7 @@ function App() {
             terms={terms}
             setPage={setPage}
             openNew={() => setPage("assignments")}
+            setItems={setItems}
           />
         )}
         {page === "assignments" && (
