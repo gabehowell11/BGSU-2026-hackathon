@@ -5,6 +5,8 @@ const { app, BrowserWindow } = require("electron");
 const database = require("./database");
 const { registerIpcHandlers } = require("./ipc");
 
+app.setName("AI Student Task Manager");
+
 // Opens the app window, loading the Vite dev server or the built page.
 function createWindow() {
   const window = new BrowserWindow({

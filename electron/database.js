@@ -104,6 +104,8 @@ function openDatabase(userDataDirectory) {
     CREATE INDEX IF NOT EXISTS idx_usage_log_timestamp ON usage_log(timestamp);
     CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages(timestamp);
   `);
+  ensureItemMetadataColumns();
+  ensureStarterWorkspace();
   database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 
   return databasePath;
@@ -130,6 +132,49 @@ function closeDatabase() {
     database.close();
     database = undefined;
   }
+}
+
+// Adds optional assignment metadata without changing the existing core schema contract.
+function ensureItemMetadataColumns() {
+  const columns = database.prepare("PRAGMA table_info(items)").all();
+  const names = new Set(columns.map((column) => column.name));
+  const additions = [
+    ["end_date", "TEXT"],
+    ["priority", "TEXT"],
+    ["estimated_minutes", "INTEGER"],
+    ["notes", "TEXT"],
+    ["all_day", "INTEGER NOT NULL DEFAULT 0"],
+  ];
+  for (const [name, definition] of additions) {
+    if (!names.has(name)) {
+      database.exec(`ALTER TABLE items ADD COLUMN ${name} ${definition}`);
+    }
+  }
+}
+
+// Creates a first-run workspace so the UI always has a term and selectable classes.
+function ensureStarterWorkspace() {
+  const existingTerm = database.prepare("SELECT id FROM terms ORDER BY id ASC LIMIT 1").get();
+  if (existingTerm) return;
+
+  const termResult = database.prepare(`
+    INSERT INTO terms (name, start_date, end_date)
+    VALUES (?, ?, ?)
+  `).run("Fall 2026", "2026-08-24", "2026-12-11");
+  const termId = insertId(termResult);
+
+  database.prepare(`
+    INSERT INTO courses (code, name, color, term_id)
+    VALUES (?, ?, ?, ?)
+  `).run("CS 3350", "Operating Systems", "#668cff", termId);
+  database.prepare(`
+    INSERT INTO courses (code, name, color, term_id)
+    VALUES (?, ?, ?, ?)
+  `).run("CS 3010", "Data Structures", "#bd86ff", termId);
+  database.prepare(`
+    INSERT INTO courses (code, name, color, term_id)
+    VALUES (?, ?, ?, ?)
+  `).run("MATH 3320", "Discrete Math", "#55b8a3", termId);
 }
 
 // Converts a SQLite insert id into a normal number.
@@ -288,6 +333,7 @@ const ITEM_SELECT = `
          items.weight_pct, items.status, items.term_id, items.course_id, items.source,
          items.date_text, items.week, items.weekday, items.source_quote,
          items.confidence, items.source_file, items.ai_due_date, items.verified_at,
+         items.end_date, items.priority, items.estimated_minutes, items.notes, items.all_day,
          courses.code AS course_code, courses.name AS course_name,
          courses.color AS course_color
   FROM items
@@ -359,8 +405,13 @@ function itemValues(item) {
     title: requireText(item?.title, "item title"),
     type: oneOf(item.type, ITEM_TYPES, "Type", "assignment"),
     dueDate: optionalDate(item.dueDate, "Due date"),
+    endDate: optionalDate(item.endDate, "End date"),
     dueTime: blankToNull(item.dueTime),
     weightPct,
+    priority: blankToNull(item.priority),
+    estimatedMinutes: optionalInteger(item.estimatedMinutes, "Estimated time"),
+    notes: blankToNull(item.notes),
+    allDay: item.allDay === true ? 1 : 0,
     status: oneOf(item.status, ITEM_STATUSES, "Status", "todo"),
     termId: item.termId,
     courseId,
@@ -399,10 +450,11 @@ function insertItem(values, options = {}) {
     INSERT INTO items (
       title, type, due_date, due_time, weight_pct, status, term_id, course_id,
       source, date_text, week, weekday, source_quote, confidence, source_file,
-      ai_due_date, verified_at
+      ai_due_date, verified_at, end_date, priority, estimated_minutes, notes, all_day
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-      CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END
+      CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END,
+      ?, ?, ?, ?, ?
     )
   `).run(
     values.title,
@@ -422,6 +474,11 @@ function insertItem(values, options = {}) {
     values.sourceFile,
     aiDueDate,
     markVerified ? 1 : 0,
+    values.endDate,
+    values.priority,
+    values.estimatedMinutes,
+    values.notes,
+    values.allDay,
   );
 
   return getItem(insertId(result));
@@ -491,6 +548,11 @@ function updateItem(id, patch) {
     confidence: patch.confidence !== undefined ? patch.confidence : existing.confidence,
     sourceFile: patch.sourceFile !== undefined ? patch.sourceFile : existing.source_file,
     aiDueDate: patch.aiDueDate !== undefined ? patch.aiDueDate : existing.ai_due_date,
+    endDate: patch.endDate !== undefined ? patch.endDate : existing.end_date,
+    priority: patch.priority !== undefined ? patch.priority : existing.priority,
+    estimatedMinutes: patch.estimatedMinutes !== undefined ? patch.estimatedMinutes : existing.estimated_minutes,
+    notes: patch.notes !== undefined ? patch.notes : existing.notes,
+    allDay: patch.allDay !== undefined ? patch.allDay : Boolean(existing.all_day),
   });
 
   const duplicate = findDuplicate(values.title, values.courseId, values.dueDate);
@@ -503,7 +565,8 @@ function updateItem(id, patch) {
     SET title = ?, type = ?, due_date = ?, due_time = ?, weight_pct = ?,
         status = ?, term_id = ?, course_id = ?, source = ?, date_text = ?,
         week = ?, weekday = ?, source_quote = ?, confidence = ?, source_file = ?,
-        ai_due_date = ?
+        ai_due_date = ?, end_date = ?, priority = ?, estimated_minutes = ?,
+        notes = ?, all_day = ?
     WHERE id = ?
   `).run(
     values.title,
@@ -522,6 +585,11 @@ function updateItem(id, patch) {
     values.confidence,
     values.sourceFile,
     values.aiDueDate,
+    values.endDate,
+    values.priority,
+    values.estimatedMinutes,
+    values.notes,
+    values.allDay,
     id,
   );
 
