@@ -1,0 +1,96 @@
+const { ipcMain } = require("electron");
+const database = require("./database");
+const aivana = require("./aivana");
+const { requiredId, optionalId, itemIds } = require("./validation");
+
+// Add new channels in the feature file (registerExtractionHandlers in
+// extraction.js, and so on) and call that function from here. Do not add
+// handlers in main.js.
+function registerIpcHandlers() {
+  // Smoke test. Delete aivana:generate when extract:run and chat:send exist.
+  ipcMain.handle("aivana:generate", (_event, prompt) => aivana.generate(prompt));
+
+  // Returns every saved term.
+  ipcMain.handle("terms:list", () => database.listTerms());
+  // Saves a new term.
+  ipcMain.handle("terms:create", (_event, term) => database.createTerm(term));
+  // Replaces an existing term's name and dates.
+  ipcMain.handle("terms:update", (_event, id, term) => {
+    return database.updateTerm(requiredId(id, "term"), term);
+  });
+  // Deletes a term and the courses and items that belong to it.
+  ipcMain.handle("terms:delete", (_event, id) => database.deleteTerm(requiredId(id, "term")));
+
+  // Returns every course, or the courses in one term.
+  ipcMain.handle("courses:list", (_event, termId) => {
+    return database.listCourses(optionalId(termId, "term"));
+  });
+  // Saves a course under a term.
+  ipcMain.handle("courses:create", (_event, course) => database.createCourse({
+    ...course,
+    termId: requiredId(course?.termId, "term"),
+  }));
+  // Replaces a course's code, name, color, and term.
+  ipcMain.handle("courses:update", (_event, id, course) => database.updateCourse(
+    requiredId(id, "course"),
+    { ...course, termId: requiredId(course?.termId, "term") },
+  ));
+  // Deletes a course and the items that belong to it.
+  ipcMain.handle("courses:delete", (_event, id) => {
+    return database.deleteCourse(requiredId(id, "course"));
+  });
+
+  // Returns items, optionally limited to one term.
+  ipcMain.handle("items:list", (_event, filter) => {
+    const next = { ...(filter || {}) };
+    if (next.termId !== undefined && next.termId !== null && next.termId !== "") {
+      next.termId = requiredId(next.termId, "term");
+    } else {
+      delete next.termId;
+    }
+    return database.listItems(next);
+  });
+  // Returns items due between two dates.
+  ipcMain.handle("items:list-range", (_event, from, to) => database.listItemsInRange(from, to));
+  // Saves one item.
+  ipcMain.handle("items:create", (_event, item) => database.createItem({
+    ...itemIds(item),
+    termId: requiredId(item?.termId, "term"),
+  }));
+  // Saves many items in one transaction, and can mark the batch verified.
+  ipcMain.handle("items:create-many", (_event, items, options) => database.createItems(
+    (Array.isArray(items) ? items : []).map((item) => ({
+      ...itemIds(item),
+      termId: requiredId(item?.termId, "term"),
+    })),
+    { verified: options?.verified === true },
+  ));
+  // Updates only the item fields that were sent.
+  ipcMain.handle("items:update", (_event, id, item) => {
+    return database.updateItem(requiredId(id, "item"), itemIds(item));
+  });
+  // Changes one item's status.
+  ipcMain.handle("items:set-status", (_event, id, status) => {
+    return database.setItemStatus(requiredId(id, "item"), status);
+  });
+  // Marks one item verified.
+  ipcMain.handle("items:verify", (_event, id) => database.setItemVerified(requiredId(id, "item")));
+  // Marks a list of items verified in one transaction.
+  ipcMain.handle("items:verify-many", (_event, ids) => database.verifyItems(
+    (Array.isArray(ids) ? ids : []).map((id) => requiredId(id, "item")),
+  ));
+  // Deletes one item.
+  ipcMain.handle("items:delete", (_event, id) => database.deleteItem(requiredId(id, "item")));
+
+  // Returns recorded Aivana usage, newest first. Writes happen inside aivana.js.
+  ipcMain.handle("usage:list", () => database.listUsage());
+
+  // Returns the full saved chat. Writes happen inside the future chat handler.
+  ipcMain.handle("chat:list", () => database.listChatMessages());
+  // Returns at most the last 8 chat messages.
+  ipcMain.handle("chat:recent", () => database.listRecentChatMessages());
+  // Deletes every saved chat message.
+  ipcMain.handle("chat:clear", () => database.clearChatMessages());
+}
+
+module.exports = { registerIpcHandlers };
