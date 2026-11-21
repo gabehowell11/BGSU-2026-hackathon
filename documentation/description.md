@@ -1,5 +1,5 @@
 # AI Student Task Manager
-
+This document outlines our plans/thought process throughout the assignment; many of the features/design choices changed after creating this, so it is not completely accurate. For a more accurate feature list, visit the readme file.
 ## Who It's For
 
 Students who need an easy way to track all of the important dates and assignments from their different classes.
