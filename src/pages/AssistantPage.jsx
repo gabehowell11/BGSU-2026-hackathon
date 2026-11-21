@@ -31,6 +31,14 @@ export default function AssistantPage({ setItems }) {
     const content = input.trim();
     if (!content || loading) return;
 
+    const optimisticMessage = {
+      id: `pending-${Date.now()}`,
+      role: "user",
+      content,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages((current) => [...current, optimisticMessage]);
+    setInput("");
     setLoading(true);
     setError("");
     setPendingActions([]);
@@ -39,11 +47,12 @@ export default function AssistantPage({ setItems }) {
     try {
       if (!window.aivana?.chat) throw new Error("The assistant API is unavailable.");
       const response = await window.aivana.chat(content);
-      setInput("");
       setMessages(await window.database.listChatMessages());
       setPendingActions(response.actions || []);
       setRejectedActions(response.rejected || []);
     } catch (nextError) {
+      setMessages((current) => current.filter((message) => message.id !== optimisticMessage.id));
+      setInput(content);
       setError(nextError.message || "The assistant could not respond.");
     } finally {
       setLoading(false);

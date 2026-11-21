@@ -115,6 +115,12 @@ function registerIpcHandlers() {
   // Returns recorded Aivana usage, newest first. Writes happen inside aivana.js.
   ipcMain.handle("usage:list", () => database.listUsage());
 
+  // Returns files that produced or reused an Aivana extraction.
+  ipcMain.handle("uploaded-files:list", () => database.listUploadedFiles());
+  ipcMain.handle("uploaded-files:delete", (_event, id) => {
+    return database.deleteUploadedFile(requiredId(id, "uploaded file"));
+  });
+
   // Returns the full saved chat. Writes happen inside chat.js.
   ipcMain.handle("chat:list", () => database.listChatMessages());
   // Returns at most the last 8 chat messages.

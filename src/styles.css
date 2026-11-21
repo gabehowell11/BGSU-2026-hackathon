@@ -149,7 +149,8 @@ button, .search-field, .filter-select, .bulk-date, .assignment-form input, .assi
 .primary-nav { display: grid; gap: 2px; width: 100%; }
 .primary-nav button, .sidebar-section button, .recent button { position: relative; display: flex; align-items: center; gap: 11px; width: 100%; height: 38px; padding: 0 10px; border: 0; border-radius: var(--radius); color: var(--muted); background: transparent; font-weight: var(--w-body); text-align: left; }
 .primary-nav button:hover, .sidebar-section button:hover, .recent button:hover { color: var(--text); background: var(--surface-2); }
-.primary-nav button.active { color: var(--text); background: var(--surface-3); }
+.primary-nav button.active, .sidebar-section button.active { color: var(--text); background: var(--surface-3); }
+.sidebar-section button.active svg { color: var(--accent); }
 .primary-nav button.active svg { color: var(--accent); }
 .primary-nav button.active::before { content: ""; position: absolute; left: -12px; top: 10px; bottom: 10px; width: 3px; border-radius: 0; background: var(--accent); }
 .sidebar.collapsed .primary-nav button.active::before { left: -12px; }
@@ -305,6 +306,48 @@ input[type="checkbox"]:indeterminate::after { content: ""; width: 8px; height: 2
 .check-label { display: flex !important; grid-auto-flow: column; justify-content: start; align-items: center; gap: 9px !important; cursor: pointer; }
 .check-label input { width: 16px !important; height: 16px !important; }
 .drawer-actions { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 8px; margin-top: 10px; padding-top: 18px; border-top: 1px solid var(--line); }
+
+/* ---------- Files ---------- */
+.files-header { align-items: center; }
+.file-controls { display: grid; grid-template-columns: minmax(180px, 240px) minmax(240px, 360px); gap: 12px; margin-bottom: 16px; }
+.file-controls label { display: grid; gap: 7px; color: var(--muted); font-size: 12.5px; }
+.file-controls select { height: 36px; padding: 0 32px 0 11px; border: 1px solid var(--line); border-radius: var(--radius); outline: none; color: var(--text); background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23858b94' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 11px center; appearance: none; transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease); }
+.file-controls select:hover { border-color: var(--line-strong); }
+.file-controls select:focus-visible { border-color: var(--accent-ring); box-shadow: 0 0 0 3px var(--accent-soft); }
+.files-result { margin-bottom: 14px; padding: 10px 12px; border: 1px solid var(--line); border-left: 2px solid var(--accent-strong); color: var(--text-2); background: var(--surface); font-size: 13px; animation: page-in 200ms var(--ease) both; }
+.files-table-wrap { overflow: hidden; border: 1px solid var(--line); border-top: 2px solid var(--accent-strong); border-radius: var(--radius-lg); background: var(--surface); }
+.files-table-header, .file-row { display: grid; grid-template-columns: minmax(260px, 1fr) 200px 150px 42px; align-items: center; gap: 12px; padding: 0 14px; }
+.files-table-header { height: 40px; border-bottom: 1px solid var(--accent-line); color: var(--muted); background: var(--surface-2); font-size: 12px; }
+.file-row { min-height: 60px; border-bottom: 1px solid var(--line); color: var(--text-2); font-size: 13px; transition: background-color var(--fast) var(--ease); }
+.file-row:last-child { border-bottom: 0; }
+.file-row:hover { background: var(--surface-2); }
+.file-row .icon-button { opacity: 0; }
+.file-row:hover .icon-button, .file-row .icon-button:focus-visible { opacity: 1; }
+.file-row .icon-button:hover { color: var(--danger); background: var(--danger-soft); }
+.file-count { font-size: 15px; }
+.file-name { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.file-name div { display: grid; gap: 3px; min-width: 0; }
+.file-name strong { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+.file-name small { color: var(--muted); font-size: 11.5px; }
+.file-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; border: 1px solid var(--line); border-radius: var(--radius); color: var(--text-2); background: var(--surface-3); }
+
+/* Review drawer for scanned assignments */
+button.drawer-overlay { padding: 0; border: 0; cursor: default; animation: fade-in var(--med) var(--ease); }
+.review-drawer { position: fixed; right: 0; top: 38px; z-index: 21; width: 520px; height: calc(100vh - 38px); padding: 24px; overflow-y: auto; border-left: 1px solid var(--line-strong); background: var(--surface-2); box-shadow: -24px 0 60px rgba(0, 0, 0, .35); animation: drawer-in 260ms var(--ease); }
+.draft-list { display: grid; gap: 8px; }
+.draft-card { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); cursor: pointer; transition: border-color var(--fast) var(--ease), background-color var(--fast) var(--ease); }
+.draft-card:hover { border-color: var(--line-strong); }
+.draft-card:has(> input:checked) { border-color: var(--accent-line); background: rgba(74, 143, 231, .06); }
+.draft-card > input { margin-top: 11px; }
+.draft-card > div { display: grid; gap: 8px; min-width: 0; }
+.draft-card small { color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.draft-card .draft-warning { padding-left: 8px; border-left: 2px solid var(--accent-strong); color: var(--text-2); }
+.draft-title, .draft-fields input, .draft-fields select { width: 100%; height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius); outline: none; color: var(--text); background: var(--surface-2); font-size: 13px; transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease); }
+.draft-fields select { padding-right: 30px; background: var(--surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23858b94' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center; appearance: none; }
+.draft-title:hover, .draft-fields input:hover, .draft-fields select:hover { border-color: var(--line-strong); }
+.draft-title:focus, .draft-fields input:focus, .draft-fields select:focus { border-color: var(--accent-ring); box-shadow: 0 0 0 3px var(--accent-soft); }
+.draft-fields { display: grid; grid-template-columns: 160px 1fr; gap: 8px; }
+.review-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }
 
 /* ---------- Assistant ---------- */
 .assistant-header { align-items: center; }
@@ -523,7 +566,7 @@ button.dl-row-main:hover b { color: var(--accent); }
 .panel-header h2::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 8px 2px 0; background: var(--accent-strong); vertical-align: middle; }
 
 /* ---------- Titles (World Mono) — kept last so it wins over component rules ---------- */
-.page-header h1, .dl-welcome h1, .drawer-header h2, .calendar-nav h2, .panel-header h2, .chat-empty h2,
+.page-header h1, .dl-welcome h1, .file-count, .drawer-header h2, .calendar-nav h2, .panel-header h2, .chat-empty h2,
 .brand > span, .dl-next-title, .dl-unit b, .dl-sep, .dl-tally b, .dl-line-head h2, .dl-col h2, .dl-class-count, .window-mark, .brand-mark, .chat-empty-mark, .avatar {
   font-family: var(--font-display);
   font-weight: var(--w-display);

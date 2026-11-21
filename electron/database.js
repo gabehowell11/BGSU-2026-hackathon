@@ -133,6 +133,19 @@ function openDatabase(userDataDirectory) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS uploaded_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      mime_type TEXT,
+      file_size INTEGER NOT NULL DEFAULT 0,
+      stored_path TEXT,
+      plaintext TEXT NOT NULL DEFAULT '',
+      sha256 TEXT,
+      draft_count INTEGER NOT NULL DEFAULT 0,
+      sent_as TEXT NOT NULL DEFAULT 'text',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_courses_term_id ON courses(term_id);
     CREATE INDEX IF NOT EXISTS idx_items_term_id ON items(term_id);
     CREATE INDEX IF NOT EXISTS idx_items_course_id ON items(course_id);
@@ -158,6 +171,7 @@ function resetSchema() {
     DROP TABLE IF EXISTS usage_log;
     DROP TABLE IF EXISTS chat_messages;
     DROP TABLE IF EXISTS extraction_cache;
+    DROP TABLE IF EXISTS uploaded_files;
     DROP TABLE IF EXISTS settings;
     DROP TABLE IF EXISTS calendar_events;
     DROP TABLE IF EXISTS assignments;
@@ -919,6 +933,63 @@ function saveCachedExtraction(cacheKey, items) {
   `).run(EXTRACTION_CACHE_LIMIT);
 }
 
+function saveUploadedFile(file) {
+  if (file.sha256) {
+    const existing = database.prepare(`
+      SELECT id FROM uploaded_files WHERE sha256 = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(file.sha256);
+    if (existing) {
+      database.prepare(`
+        UPDATE uploaded_files
+        SET name = ?, plaintext = ?, draft_count = ?, created_at = datetime('now')
+        WHERE id = ?
+      `).run(
+        String(file.name).slice(0, 255),
+        String(file.plaintext || "").slice(0, 400000),
+        Number(file.draftCount || 0),
+        existing.id,
+      );
+      return database.prepare(
+        "SELECT * FROM uploaded_files WHERE id = ?",
+      ).get(existing.id);
+    }
+  }
+  const result = database.prepare(`
+    INSERT INTO uploaded_files (
+      name, mime_type, file_size, stored_path, plaintext, sha256,
+      draft_count, sent_as
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'text')
+  `).run(
+    String(file.name).slice(0, 255),
+    file.mimeType || null,
+    Number(file.fileSize || 0),
+    file.storedPath || null,
+    String(file.plaintext || "").slice(0, 400000),
+    file.sha256 || null,
+    Number(file.draftCount || 0),
+  );
+  return database.prepare(
+    "SELECT * FROM uploaded_files WHERE id = ?",
+  ).get(result.lastInsertRowid);
+}
+
+function listUploadedFiles() {
+  return database.prepare(`
+    SELECT id, name, mime_type, file_size, plaintext, sha256,
+           draft_count, sent_as, created_at
+    FROM uploaded_files
+    ORDER BY created_at DESC, id DESC
+  `).all();
+}
+
+function deleteUploadedFile(id) {
+  const result = database.prepare(
+    "DELETE FROM uploaded_files WHERE id = ?",
+  ).run(id);
+  return result.changes > 0;
+}
+
 // Settings every caller gets even before anything is saved.
 const DEFAULT_SETTINGS = {
   onboardingComplete: false,
@@ -1101,6 +1172,9 @@ module.exports = {
   clearChatMessages,
   getCachedExtraction,
   saveCachedExtraction,
+  saveUploadedFile,
+  listUploadedFiles,
+  deleteUploadedFile,
   getSettings,
   updateSettings,
   createSetup,
