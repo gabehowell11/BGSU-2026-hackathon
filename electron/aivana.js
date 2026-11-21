@@ -2,7 +2,13 @@ const database = require("./database");
 
 let client;
 
+// The code Aivana gives when a json_schema answer did not fit its size limit or
+// did not match the schema. Sending the same request again fails the same way.
+const ANSWER_TOO_LONG = "structured_output_failed";
+
+// True for failures worth sending again unchanged (provider or network hiccups).
 function isTemporaryError(error) {
+  if (error?.code === ANSWER_TOO_LONG) return false;
   return error?.constructor?.name === "UpstreamError"
     || error?.code === "upstream_error"
     || error?.status === 502
@@ -10,18 +16,25 @@ function isTemporaryError(error) {
     || error?.status === 504;
 }
 
+// True when Aivana refused a request because of its rate limit. The account
+// runs at most 4 requests at once (shared by everyone using the same key), so
+// this usually clears as soon as another request finishes.
+function isBusyError(error) {
+  return error?.code === "rate_limit_exceeded" || error?.status === 429;
+}
+
+// Sends a request, trying again after a temporary failure (up to 3 tries) or
+// when the account is busy (up to 6 tries, waiting longer each time).
 async function retryTemporary(send) {
-  let lastError;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 1; ; attempt += 1) {
     try {
       return await send();
     } catch (error) {
-      lastError = error;
-      if (!isTemporaryError(error) || attempt === 2) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 750 * (attempt + 1)));
+      const busy = isBusyError(error);
+      if (busy ? attempt >= 6 : !isTemporaryError(error) || attempt >= 3) throw error;
+      await new Promise((resolve) => setTimeout(resolve, (busy ? 2000 : 750) * attempt));
     }
   }
-  throw lastError;
 }
 
 // Returns one shared Aivana client, created on first use.
@@ -107,6 +120,9 @@ async function generateStructured({ feature, prompt, schema, ...options }) {
 // Turns SDK errors into short messages the renderer can show as-is.
 function friendlyError(error) {
   const name = error?.constructor?.name;
+  if (error?.code === ANSWER_TOO_LONG) {
+    return new Error("Aivana could not produce an answer in the required format. Try a shorter or simpler request.");
+  }
   if (name === "AuthError") return new Error("Aivana rejected the API key. Check AIVANA_API_KEY in .env.");
   if (name === "RateLimitError") return new Error("Aivana's rate limit or quota was reached. Try again shortly.");
   if (name === "UpstreamError") return new Error("Aivana had a temporary problem. Try again.");
@@ -114,6 +130,19 @@ function friendlyError(error) {
     return new Error("Aivana timed out. Try a smaller or text-based file.");
   }
   return error instanceof Error ? error : new Error(String(error));
+}
+
+// Returns a plain-text answer in one piece, with no schema checking.
+async function generateText({ feature, prompt = null, ...options }) {
+  const aivana = await getClient();
+  let response;
+  try {
+    response = await retryTemporary(() => aivana.generate(prompt, options));
+  } catch (error) {
+    throw friendlyError(error);
+  }
+  logResponseUsage(feature, response);
+  return typeof response.answer === "string" ? response.answer : "";
 }
 
 // Streams a plain-text answer. Calls onDelta(text) for each piece as it
@@ -165,6 +194,7 @@ module.exports = {
   getClient,
   generate,
   generateStructured,
+  generateText,
   streamText,
   friendlyError,
   logResponseUsage,

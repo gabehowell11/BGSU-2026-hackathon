@@ -74,8 +74,11 @@ export default function FilesPage({ terms, courses, setItems }) {
         return;
       }
 
+      // Shown when part of the document could not be fully read.
+      const warnings = result.warnings?.length ? ` ${result.warnings.join(" ")}` : "";
+
       if (!result.drafts.length) {
-        setResultMessage("No dated assignments were found in this file.");
+        setResultMessage(`No dated assignments were found in this file.${warnings}`);
         return;
       }
 
@@ -90,7 +93,7 @@ export default function FilesPage({ terms, courses, setItems }) {
       setSelected(Object.fromEntries(nextDrafts.map((draft) => [draft.draftId, true])));
       setReviewOpen(true);
       setResultMessage(
-        `${result.cached ? "Loaded saved scan" : "Scanned"} ${result.files.join(", ")}. Review the assignments before saving.`,
+        `${result.cached ? "Loaded saved scan" : "Scanned"} ${result.files.join(", ")}. Review the assignments before saving.${warnings}`,
       );
     } catch (nextError) {
       setError(nextError.message || "The file could not be scanned.");
