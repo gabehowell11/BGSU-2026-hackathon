@@ -4,6 +4,7 @@ import AssignmentsPage from "./pages/AssignmentsPage";
 import CalendarPage from "./pages/CalendarPage";
 import HomePage from "./pages/HomePage";
 import AssistantPage from "./pages/AssistantPage";
+import FilesPage from "./pages/FilesPage";
 import Sidebar from "./components/Sidebar";
 import "./styles.css";
 
@@ -96,7 +97,14 @@ function App() {
           />
         )}
         {page === "chat" && <AssistantPage setItems={setItems} />}
-        {page !== "home" && page !== "assignments" && page !== "calendar" && page !== "chat" && <PlaceholderPage page={page} />}
+        {page === "files" && (
+          <FilesPage
+            terms={terms}
+            courses={courses}
+            setItems={setItems}
+          />
+        )}
+        {page !== "home" && page !== "assignments" && page !== "calendar" && page !== "chat" && page !== "files" && <PlaceholderPage page={page} />}
         </main>
       </div>
     </div>

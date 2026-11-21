@@ -34,7 +34,7 @@ export default function Sidebar({ collapsed, setCollapsed, page, setPage, course
         <>
           <div className="sidebar-section">
             <span className="sidebar-label">Workspace</span>
-            <button type="button"><Icon name="folder" /><span>Files</span></button>
+            <button type="button" className={page === "files" ? "active" : ""} onClick={() => setPage("files")}><Icon name="folder" /><span>Files</span></button>
             <button type="button"><Icon name="settings" /><span>Settings</span></button>
           </div>
           <div className="recent">
