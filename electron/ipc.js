@@ -98,6 +98,20 @@ function registerIpcHandlers() {
     return database.deleteItems(requiredIds(ids, "item"));
   });
 
+  // Creates or reuses a term and course and saves confirmed drafts, all at once
+  // (onboarding after a setup-mode extract:run).
+  ipcMain.handle("setup:create", (_event, setup) => database.createSetup({
+    term: setup?.term?.id ? { id: requiredId(setup.term.id, "term") } : setup?.term,
+    course: setup?.course?.id ? { id: requiredId(setup.course.id, "course") } : setup?.course,
+    // The term id is filled in by createSetup, so any term id on a draft is dropped.
+    items: (Array.isArray(setup?.items) ? setup.items : []).map(({ termId: _termId, ...item }) => itemIds(item)),
+  }));
+
+  // Returns all settings, with defaults (onboardingComplete: false, userName: null).
+  ipcMain.handle("settings:get", () => database.getSettings());
+  // Saves only the keys sent and returns all settings. null resets a key.
+  ipcMain.handle("settings:update", (_event, patch) => database.updateSettings(patch));
+
   // Returns recorded Aivana usage, newest first. Writes happen inside aivana.js.
   ipcMain.handle("usage:list", () => database.listUsage());
 

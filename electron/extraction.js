@@ -4,7 +4,11 @@ const path = require("node:path");
 const { ipcMain, dialog, BrowserWindow } = require("electron");
 const database = require("./database");
 const aivana = require("./aivana");
-const { extractionResultSchema, EXTRACTION_TYPES, WEEKDAYS } = require("../shared/schemas");
+const {
+  extractionResultSchema,
+  setupExtractionResultSchema,
+  EXTRACTION_TYPES,
+} = require("../shared/schemas");
 const {
   blankToNull,
   requireDate,
@@ -13,10 +17,10 @@ const {
   optionalWeekday,
   optionalTime,
   optionalConfidence,
-  requiredId,
   optionalId,
   addDays,
-  weekdayIndex,
+  localDate,
+  resolveWeekDate,
 } = require("./validation");
 
 const MIB = 1024 * 1024;
@@ -189,14 +193,6 @@ function extractionCacheKey(prompt, attachments) {
   return hash.digest("hex");
 }
 
-// Returns the date of a weekday in a term week. Week 1 is the Monday-to-Sunday
-// week that contains the term's start date.
-function resolveWeekDate(term, week, weekday) {
-  if (!week || week < 1 || !weekday) return null;
-  const firstMonday = addDays(term.start_date, -weekdayIndex(term.start_date));
-  return addDays(firstMonday, (week - 1) * 7 + WEEKDAYS.indexOf(weekday));
-}
-
 // Reads a value and returns null instead of throwing when the AI sent something invalid.
 function lenient(read) {
   try {
@@ -212,18 +208,22 @@ function toDraft(raw, index, { term, courseId, sourceFile }) {
   const title = blankToNull(raw?.title);
   const week = lenient(() => optionalInteger(raw?.week, "Week"));
   const weekday = lenient(() => optionalWeekday(raw?.weekday));
-  const aiDate = lenient(() => (raw?.due_date ? requireDate(String(raw.due_date).trim(), "Due date") : null));
+  const statedDate = aiDate(raw?.due_date);
   const weekDate = resolveWeekDate(term, week, weekday);
 
   // Prefer the date computed from the term calendar over the model's own math.
-  let dueDate = weekDate || aiDate;
-  if (weekDate && aiDate && weekDate !== aiDate) {
-    warnings.push(`Aivana said ${aiDate}, but week ${week} ${weekday} is ${weekDate}. Using ${weekDate}.`);
+  const dueDate = weekDate || statedDate;
+  if (weekDate && statedDate && weekDate !== statedDate) {
+    warnings.push(`Aivana said ${statedDate}, but week ${week} ${weekday} is ${weekDate}. Using ${weekDate}.`);
   }
-  if (week && !weekday && !aiDate) {
+  if (week && !weekday && !statedDate) {
     warnings.push(`Week ${week} has no weekday, so no date was set.`);
   }
-  if (dueDate && (dueDate < addDays(term.start_date, -7) || dueDate > addDays(term.end_date, 14))) {
+  if (week && weekday && !term.start_date && !statedDate) {
+    warnings.push(`Week ${week} ${weekday} needs the term start date to get a date.`);
+  }
+  if (dueDate && term.start_date && term.end_date
+    && (dueDate < addDays(term.start_date, -7) || dueDate > addDays(term.end_date, 14))) {
     warnings.push(`${dueDate} is outside ${term.name}.`);
   }
   if (!dueDate) {
@@ -239,7 +239,8 @@ function toDraft(raw, index, { term, courseId, sourceFile }) {
   const type = EXTRACTION_TYPES.includes(raw?.type) ? raw.type : "other";
   const weightPct = lenient(() => optionalNumber(raw?.weight_pct, "Weight"));
   const dueTime = database.withDefaultDueTime(type, dueDate, lenient(() => optionalTime(raw?.due_time)));
-  const duplicate = title ? database.findDuplicate(title, courseId, dueDate ?? null) : null;
+  // Without a saved term there is nothing to be a duplicate of yet.
+  const duplicate = title && term.id ? database.findDuplicate(title, courseId, dueDate ?? null) : null;
   if (duplicate) warnings.push("This item is already saved.");
 
   return {
@@ -249,6 +250,8 @@ function toDraft(raw, index, { term, courseId, sourceFile }) {
     title: title || "Untitled item",
     type,
     dueDate,
+    // The date worked out from week and weekday, so a later term date change can recompute it.
+    weekDate,
     dueTime,
     weightPct: weightPct !== null && weightPct >= 0 && weightPct <= 100 ? weightPct : null,
     status: "todo",
@@ -259,30 +262,65 @@ function toDraft(raw, index, { term, courseId, sourceFile }) {
     sourceQuote: blankToNull(raw?.source_quote),
     confidence,
     sourceFile,
-    aiDueDate: aiDate,
+    aiDueDate: statedDate,
     duplicateOf: duplicate ? duplicate.id : null,
     warnings,
   };
 }
 
-// Sends files or pasted text to Aivana and returns unsaved drafts for the user to confirm.
-// options: { termId, courseId?, files?: [{ name, data }], text?, force? }. With no
-// files and no text, a file picker opens. Drafts are NOT saved: after the user
-// edits and confirms them, call database.createItems(drafts, { verified: true }).
-// The same documents for the same term and course reuse the saved Aivana result
-// (no tokens spent) unless force is true.
-async function runExtraction(event, options = {}) {
-  const termId = requiredId(options?.termId, "term");
-  const term = database.getTerm(termId);
-  if (!term) throw new Error("Term not found.");
+// Reads a YYYY-MM-DD date from the AI, or null.
+function aiDate(value) {
+  return lenient(() => (value ? requireDate(String(value).trim(), "Date") : null));
+}
 
+// Cleans the term the AI read from the documents (setup mode).
+function toSuggestedTerm(raw) {
+  let startDate = aiDate(raw?.start_date);
+  let endDate = aiDate(raw?.end_date);
+  if (startDate && endDate && startDate > endDate) {
+    startDate = null;
+    endDate = null;
+  }
+  return { name: blankToNull(raw?.name), startDate, endDate };
+}
+
+// Cleans the course the AI read from the documents (setup mode).
+function toSuggestedCourse(raw) {
+  return { code: blankToNull(raw?.code), name: blankToNull(raw?.name) };
+}
+
+// Sends files or pasted text to Aivana and returns unsaved drafts for the user to confirm.
+// options: { termId?, courseId?, files?: [{ name, data }], text?, force? }. With no
+// files and no text, a file picker opens. Drafts are NOT saved.
+//
+// With a termId (normal use): after the user edits and confirms the drafts, call
+// database.createItems(drafts, { verified: true }).
+//
+// Without a termId (setup mode, e.g. onboarding before any term exists): Aivana
+// also reads the term and course from the documents. The result includes
+// suggestedTerm { name, startDate, endDate } and suggestedCourse { code, name }
+// for the user to confirm or fix, and drafts have termId and courseId null.
+// Save everything with database.createSetup({ term, course, items }).
+//
+// The same documents with the same term and course reuse the saved Aivana
+// result (no tokens spent) unless force is true.
+async function runExtraction(event, options = {}) {
   const courseId = optionalId(options?.courseId, "course");
   let course = null;
   if (courseId !== null) {
     course = database.getCourse(courseId);
     if (!course) throw new Error("Course not found.");
-    if (course.term_id !== termId) throw new Error("That course belongs to a different term.");
   }
+
+  let termId = optionalId(options?.termId, "term");
+  if (termId === null && course) termId = course.term_id;
+  let term = null;
+  if (termId !== null) {
+    term = database.getTerm(termId);
+    if (!term) throw new Error("Term not found.");
+    if (course && course.term_id !== termId) throw new Error("That course belongs to a different term.");
+  }
+  const setupMode = term === null;
 
   let files = Array.isArray(options?.files) ? options.files : [];
   const pastedText = blankToNull(options?.text);
@@ -300,35 +338,61 @@ async function runExtraction(event, options = {}) {
   }
 
   const fileNames = [...attachments.map((file) => file.name), ...texts.map((entry) => entry.name)];
+  const context = setupMode
+    ? [
+      "No term or course is set up yet.",
+      // Only the year, so the cached result stays valid all year.
+      `The current year is ${localDate().slice(0, 4)}.`,
+      'Also fill "term" with the term name (for example "Fall 2026") and its first and last day of classes, and "course" with the course code and name. Use only what the documents state, and use those term dates to choose each item\'s year.',
+    ]
+    : [
+      `Term: ${term.name}, ${term.start_date} to ${term.end_date}.`,
+      course ? `Course: ${course.code} ${course.name}.` : "Course: not specified.",
+    ];
   const prompt = [
-    `Term: ${term.name}, ${term.start_date} to ${term.end_date}.`,
-    course ? `Course: ${course.code} ${course.name}.` : "Course: not specified.",
+    ...context,
     attachments.length ? `Attached: ${attachments.map((file) => file.name).join(", ")}.` : "",
     "List every dated item in these documents.",
     documentText ? `\n${documentText}` : "",
   ].filter(Boolean).join("\n");
 
   const cacheKey = extractionCacheKey(prompt, attachments);
-  let rawItems = options?.force === true ? null : database.getCachedExtraction(cacheKey);
-  const cached = rawItems !== null;
+  let result = options?.force === true ? null : database.getCachedExtraction(cacheKey);
+  if (Array.isArray(result)) result = { items: result };
+  const cached = result !== null;
   if (!cached) {
     const { data } = await aivana.generateStructured({
       feature: "extract",
       prompt,
-      schema: extractionResultSchema,
+      schema: setupMode ? setupExtractionResultSchema : extractionResultSchema,
       system: SYSTEM_PROMPT,
       temperature: 0,
       webSearch: false,
       attachments: attachments.map(({ mimeType, data: base64 }) => ({ mimeType, data: base64 })),
     });
-    rawItems = Array.isArray(data.items) ? data.items : [];
-    database.saveCachedExtraction(cacheKey, rawItems);
+    result = {
+      items: Array.isArray(data.items) ? data.items : [],
+      term: setupMode ? data.term ?? null : null,
+      course: setupMode ? data.course ?? null : null,
+    };
+    database.saveCachedExtraction(cacheKey, result);
   }
+
+  const suggestedTerm = setupMode ? toSuggestedTerm(result.term) : null;
+  const suggestedCourse = setupMode ? toSuggestedCourse(result.course) : null;
+  // In setup mode, dates are worked out against the suggested term until it is saved.
+  const draftTerm = term || {
+    id: null,
+    name: suggestedTerm.name || "this term",
+    start_date: suggestedTerm.startDate,
+    end_date: suggestedTerm.endDate,
+  };
 
   // Drafts are rebuilt every time, so duplicate flags reflect what is saved now.
   const sourceFile = fileNames.join(", ").slice(0, 255) || null;
+  const rawItems = Array.isArray(result.items) ? result.items : [];
   const drafts = rawItems
-    .map((raw, index) => toDraft(raw, index, { term, courseId, sourceFile }))
+    .map((raw, index) => toDraft(raw, index, { term: draftTerm, courseId, sourceFile }))
     .sort((a, b) => (a.dueDate || "9999").localeCompare(b.dueDate || "9999"));
 
   return {
@@ -338,6 +402,8 @@ async function runExtraction(event, options = {}) {
     // Which inputs went as text (cheap) and which as files (scanned PDFs, images, Word, CSV).
     sentAsText: texts.map((entry) => entry.name),
     sentAsFile: attachments.map((file) => file.name),
+    suggestedTerm,
+    suggestedCourse,
     drafts,
   };
 }
@@ -348,4 +414,4 @@ function registerExtractionHandlers() {
   ipcMain.handle("extract:run", (event, options) => runExtraction(event, options));
 }
 
-module.exports = { registerExtractionHandlers, resolveWeekDate, compactText, pdfText };
+module.exports = { registerExtractionHandlers, compactText, pdfText };

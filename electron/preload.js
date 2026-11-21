@@ -4,17 +4,30 @@ contextBridge.exposeInMainWorld("aivana", {
   // Sends a prompt to the main process and returns Aivana's answer (smoke test).
   generate: (prompt) => ipcRenderer.invoke("aivana:generate", prompt),
   // Reads a syllabus, schedule, or photo and returns unsaved drafts to review.
-  // options: { termId, courseId?, files?: [{ name, data }], text?, force? }. With no
+  // options: { termId?, courseId?, files?: [{ name, data }], text?, force? }. With no
   // files and no text, a file picker opens. Returns { canceled, cached, files,
-  // sentAsText, sentAsFile, drafts }. Re-uploading the same documents reuses the
-  // saved result for free; pass force: true to ask Aivana again.
-  // Save confirmed drafts with database.createItems(drafts, { verified: true }).
+  // sentAsText, sentAsFile, suggestedTerm, suggestedCourse, drafts }.
+  // Re-uploading the same documents reuses the saved result for free; pass
+  // force: true to ask Aivana again.
+  // With a termId: save confirmed drafts with database.createItems(drafts, { verified: true }).
+  // Without one (onboarding): suggestedTerm { name, startDate, endDate } and
+  // suggestedCourse { code, name } are filled from the documents; save with
+  // database.createSetup({ term, course, items }).
   extract: (options) => ipcRenderer.invoke("extract:run", options),
   // Sends a chat message. Returns { reply, actions, rejected, messages }.
   // Nothing changes until confirmed actions go to applyChatActions.
   chat: (content) => ipcRenderer.invoke("chat:send", content),
   // Applies the chat actions the user confirmed, all or nothing.
   applyChatActions: (actions) => ipcRenderer.invoke("chat:apply-actions", actions),
+});
+
+contextBridge.exposeInMainWorld("settings", {
+  // Returns all settings: { onboardingComplete, userName, ...anything saved }.
+  // Show onboarding when onboardingComplete is false.
+  get: () => ipcRenderer.invoke("settings:get"),
+  // Saves only the keys given, e.g. { onboardingComplete: true, userName: "Sam" },
+  // and returns all settings. Passing null for a key resets it.
+  update: (patch) => ipcRenderer.invoke("settings:update", patch),
 });
 
 contextBridge.exposeInMainWorld("database", {
@@ -60,6 +73,10 @@ contextBridge.exposeInMainWorld("database", {
   deleteItems: (ids) => ipcRenderer.invoke("items:delete-many", ids),
   // Saves verified, dated items to an .ics file the user picks. Same optional filter as listItems.
   exportIcs: (filter) => ipcRenderer.invoke("export:ics", filter),
+  // Onboarding save, all or nothing: term { id } or { name, startDate, endDate },
+  // course { id } or { code, name, color? } or null, items = confirmed drafts.
+  // Matching terms and course codes are reused. Returns { term, course, created, skipped }.
+  createSetup: (setup) => ipcRenderer.invoke("setup:create", setup),
   // Returns recorded Aivana usage, newest first.
   listUsage: () => ipcRenderer.invoke("usage:list"),
   // Returns the full saved chat.
