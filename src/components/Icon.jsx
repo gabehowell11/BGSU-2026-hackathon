@@ -10,6 +10,7 @@ export default function Icon({ name, size = 18 }) {
     folder: <path d="M3 7h7l2 2h9v10H3z" />,
     search: <><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></>,
     plus: <path d="M12 5v14M5 12h14" />,
+    send: <><path d="m22 2-7 20-4-9-9-4z" /><path d="M22 2 11 13" /></>,
     chevron: <path d="m9 18 6-6-6-6" />,
     more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></>,
     close: <path d="m6 6 12 12M18 6 6 18" />,
