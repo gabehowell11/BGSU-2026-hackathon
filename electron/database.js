@@ -27,6 +27,7 @@ const {
   optionalConfidence,
   localDate,
   addDays,
+  resolveWeekDate,
 } = require("./validation");
 
 // Bump this when the CREATE TABLE statements change. An older local file is
@@ -117,6 +118,21 @@ function openDatabase(userDataDirectory) {
       timestamp TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- App settings such as onboardingComplete and userName. Values are JSON.
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Saved Aivana extraction results, keyed by a hash of everything sent,
+    -- so uploading the same documents again costs no tokens.
+    CREATE TABLE IF NOT EXISTS extraction_cache (
+      cache_key TEXT PRIMARY KEY,
+      items_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_courses_term_id ON courses(term_id);
     CREATE INDEX IF NOT EXISTS idx_items_term_id ON items(term_id);
     CREATE INDEX IF NOT EXISTS idx_items_course_id ON items(course_id);
@@ -139,6 +155,8 @@ function resetSchema() {
     DROP TABLE IF EXISTS terms;
     DROP TABLE IF EXISTS usage_log;
     DROP TABLE IF EXISTS chat_messages;
+    DROP TABLE IF EXISTS extraction_cache;
+    DROP TABLE IF EXISTS settings;
     DROP TABLE IF EXISTS calendar_events;
     DROP TABLE IF EXISTS assignments;
   `);
@@ -158,9 +176,16 @@ function insertId(result) {
   return Number(result.lastInsertRowid);
 }
 
+let transactionDepth = 0;
+
 // Runs the callback in one transaction and rolls it back if anything throws.
+// A call inside another transaction joins the outer one, so an error anywhere
+// rolls back everything.
 function transaction(work) {
+  if (transactionDepth > 0) return work();
+
   database.exec("BEGIN");
+  transactionDepth += 1;
   try {
     const result = work();
     database.exec("COMMIT");
@@ -168,6 +193,8 @@ function transaction(work) {
   } catch (error) {
     database.exec("ROLLBACK");
     throw error;
+  } finally {
+    transactionDepth -= 1;
   }
 }
 
@@ -818,6 +845,179 @@ function clearChatMessages() {
   return true;
 }
 
+const EXTRACTION_CACHE_LIMIT = 50;
+
+// Returns the saved raw extraction result for a cache key, or null.
+function getCachedExtraction(cacheKey) {
+  const row = database.prepare(`
+    SELECT items_json FROM extraction_cache WHERE cache_key = ?
+  `).get(cacheKey);
+  if (!row) return null;
+  try {
+    const result = JSON.parse(row.items_json);
+    return result && typeof result === "object" ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+// Saves a raw extraction result under a cache key and keeps only the newest entries.
+function saveCachedExtraction(cacheKey, items) {
+  database.prepare(`
+    INSERT OR REPLACE INTO extraction_cache (cache_key, items_json, created_at)
+    VALUES (?, ?, datetime('now'))
+  `).run(cacheKey, JSON.stringify(items));
+  database.prepare(`
+    DELETE FROM extraction_cache
+    WHERE cache_key NOT IN (
+      SELECT cache_key FROM extraction_cache ORDER BY created_at DESC, rowid DESC LIMIT ?
+    )
+  `).run(EXTRACTION_CACHE_LIMIT);
+}
+
+// Settings every caller gets even before anything is saved.
+const DEFAULT_SETTINGS = {
+  onboardingComplete: false,
+  userName: null,
+};
+const SETTING_KEY = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
+const MAX_SETTING_CHARS = 10000;
+
+// Checks the known settings and returns the value to store.
+function settingValue(key, value) {
+  if (key === "onboardingComplete") {
+    if (typeof value !== "boolean") throw new Error("onboardingComplete must be true or false.");
+    return value;
+  }
+  if (key === "userName") {
+    const name = blankToNull(value);
+    if (name !== null && name.length > 60) throw new Error("The name can be at most 60 characters.");
+    return name;
+  }
+  return value === undefined ? null : value;
+}
+
+// Returns every setting, with defaults filled in for unsaved keys.
+function getSettings() {
+  const settings = { ...DEFAULT_SETTINGS };
+  for (const row of database.prepare("SELECT key, value FROM settings").all()) {
+    try {
+      settings[row.key] = JSON.parse(row.value);
+    } catch {
+      // Ignore a corrupt value and keep the default.
+    }
+  }
+  return settings;
+}
+
+// Saves the given keys (other keys are left as they are) and returns all settings.
+// A null value resets that key to its default.
+function updateSettings(patch) {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+    throw new Error("Settings must be an object.");
+  }
+
+  transaction(() => {
+    for (const [key, raw] of Object.entries(patch)) {
+      if (!SETTING_KEY.test(key)) throw new Error(`"${key}" is not a valid setting name.`);
+      if (raw === null) {
+        database.prepare("DELETE FROM settings WHERE key = ?").run(key);
+        continue;
+      }
+      const json = JSON.stringify(settingValue(key, raw));
+      if (json.length > MAX_SETTING_CHARS) throw new Error(`The ${key} setting is too large.`);
+      database.prepare(`
+        INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+      `).run(key, json);
+    }
+  });
+  return getSettings();
+}
+
+// Colors given to courses created during setup, so each course looks different.
+const COURSE_PALETTE = ["#3157c8", "#c45c26", "#2f7d4a", "#8a3fb8", "#b8325a", "#1f8a99", "#a07a12", "#5a6b7d"];
+
+// Creates (or reuses) a term and course and saves the confirmed items, all in
+// one transaction. Used by onboarding after a syllabus upload with no term yet.
+// setup: {
+//   term: { id } or { name, startDate, endDate }  (reused if one matches exactly),
+//   course: { id } or { code, name, color? } or null  (reused if the code exists in the term),
+//   items: drafts from extract:run (may be empty),
+// }
+// Items get the term, and the course unless they set courseId or are holidays.
+// An item whose dueDate still equals its weekDate (the date worked out from
+// "Week N weekday") is recomputed from the final term start date, in case the
+// user changed it. Returns { term, course, created, skipped }.
+function createSetup(setup) {
+  return transaction(() => {
+    const term = resolveSetupTerm(setup?.term);
+    const course = resolveSetupCourse(setup?.course, term);
+    const items = Array.isArray(setup?.items) ? setup.items : [];
+
+    const prepared = items.map((item) => {
+      const next = { ...item, termId: term.id };
+      if (next.courseId === undefined || next.courseId === null) {
+        next.courseId = next.type === "holiday" ? null : (course ? course.id : null);
+      }
+      if (next.weekDate && next.dueDate === next.weekDate && next.week && next.weekday) {
+        next.dueDate = resolveWeekDate(term, next.week, next.weekday) || next.dueDate;
+      }
+      return next;
+    });
+
+    const saved = prepared.length > 0
+      ? createItems(prepared, { verified: true })
+      : { created: [], skipped: [] };
+    return { term, course, created: saved.created, skipped: saved.skipped };
+  });
+}
+
+// Returns the setup's term: an existing one by id, an exact name-and-dates match, or a new one.
+function resolveSetupTerm(input) {
+  if (input?.id) {
+    const existing = getTerm(input.id);
+    if (!existing) throw new Error("Term not found.");
+    return existing;
+  }
+  const values = termValues(input);
+  const match = database.prepare(`
+    SELECT id, name, start_date, end_date
+    FROM terms
+    WHERE lower(name) = lower(?) AND start_date = ? AND end_date = ?
+  `).get(values.name, values.startDate, values.endDate);
+  return match || createTerm(input);
+}
+
+// Returns the setup's course: an existing one by id, one with the same code in
+// the term, a new one, or null when none was given.
+function resolveSetupCourse(input, term) {
+  if (!input) return null;
+  if (input.id) {
+    const existing = getCourse(input.id);
+    if (!existing) throw new Error("Course not found.");
+    if (existing.term_id !== term.id) throw new Error("That course belongs to a different term.");
+    return existing;
+  }
+  if (!blankToNull(input.code) && !blankToNull(input.name)) return null;
+
+  const code = requireText(input.code, "course code");
+  const match = database.prepare(`
+    SELECT id, code, name, color, term_id
+    FROM courses
+    WHERE term_id = ? AND lower(code) = lower(?)
+  `).get(term.id, code);
+  if (match) return match;
+
+  const count = database.prepare("SELECT COUNT(*) AS count FROM courses").get().count;
+  return createCourse({
+    code,
+    name: blankToNull(input.name) || code,
+    color: blankToNull(input.color) || COURSE_PALETTE[Number(count) % COURSE_PALETTE.length],
+    termId: term.id,
+  });
+}
+
 module.exports = {
   SCHEMA_VERSION,
   openDatabase,
@@ -855,4 +1055,9 @@ module.exports = {
   listRecentChatMessages,
   addChatMessage,
   clearChatMessages,
+  getCachedExtraction,
+  saveCachedExtraction,
+  getSettings,
+  updateSettings,
+  createSetup,
 };

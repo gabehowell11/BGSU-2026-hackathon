@@ -150,6 +150,14 @@ function optionalConfidence(value) {
   return confidence;
 }
 
+// Returns the date of a weekday in a term week, or null. Week 1 is the
+// Monday-to-Sunday week that contains the term's start date.
+function resolveWeekDate(term, week, weekday) {
+  if (!term?.start_date || !week || week < 1 || !WEEKDAYS.includes(weekday)) return null;
+  const firstMonday = addDays(term.start_date, -weekdayIndex(term.start_date));
+  return addDays(firstMonday, (week - 1) * 7 + WEEKDAYS.indexOf(weekday));
+}
+
 // Returns a positive integer id, or throws.
 function requiredId(value, label) {
   const id = Number(value);
@@ -214,6 +222,7 @@ module.exports = {
   localDate,
   addDays,
   weekdayIndex,
+  resolveWeekDate,
   requiredId,
   requiredIds,
   optionalId,
