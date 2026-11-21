@@ -8,7 +8,7 @@
     "build": "vite build",
     "start": "npm run build && electron .",
     "test:aivana": "node test-aivana.mjs",
-    "seed": "node scripts/seed.js"
+    "seed": "cross-env ELECTRON_RUN_AS_NODE=1 electron scripts/seed.js"
   },
   "dependencies": {
     "@aivana/sdk": "^0.7.1",
