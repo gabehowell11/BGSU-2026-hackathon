@@ -11,7 +11,17 @@ const {
 } = require("./validation");
 
 const MAX_MESSAGE_CHARS = 4000;
-const MAX_CONTEXT_ITEMS = 150;
+
+// Token saving: the API is stateless, so history and the planner snapshot are
+// re-sent (and billed) on every message. These limits keep each turn small.
+// Items in the snapshot: overdue, the last week, the next 45 days, and undated to-dos.
+const MAX_CONTEXT_ITEMS = 80;
+const CONTEXT_DAYS_BACK = 7;
+const CONTEXT_DAYS_AHEAD = 45;
+// Older turns are cut to this many characters when re-sent as history.
+const HISTORY_MESSAGE_CHARS = 600;
+// Ceiling on reply length (reply text plus proposed actions).
+const REPLY_MAX_TOKENS = 1000;
 
 const SYSTEM_PROMPT = `You are Aivana, the assistant inside a student task manager. You help the student plan, prioritize, and manage assignments, quizzes, exams, projects, holidays, and study blocks.
 Rules:
@@ -24,49 +34,53 @@ Rules:
 - Dates are YYYY-MM-DD and times are 24-hour HH:MM. Work out relative dates such as "next Friday" from today's date in the planner data.
 - For questions that change nothing, "actions" is an empty array.`;
 
-// Describes one item on a single line for the model.
+// Describes one item on one short line, e.g.
+// "#12 Project 1 (project, CS 3350) 2026-10-09 23:59 todo high ~600m".
+// The type is left out for plain assignments.
 function itemLine(item) {
-  const due = item.due_date ? `due ${item.due_date}${item.due_time ? ` ${item.due_time}` : ""}` : "no date";
-  const parts = [
-    `#${item.id}`,
-    item.title,
-    item.type,
-    item.course_code || "no course",
-    due,
-    item.status,
-  ];
-  if (item.priority) parts.push(`priority ${item.priority}`);
-  if (item.estimated_minutes) parts.push(`~${item.estimated_minutes} min`);
-  return parts.join(" | ");
+  const tags = [item.type === "assignment" ? null : item.type, item.course_code].filter(Boolean);
+  const parts = [`#${item.id} ${item.title}${tags.length ? ` (${tags.join(", ")})` : ""}`];
+  parts.push(item.due_date ? `${item.due_date}${item.due_time ? ` ${item.due_time}` : ""}` : "undated");
+  parts.push(item.status);
+  if (item.priority) parts.push(item.priority);
+  if (item.estimated_minutes) parts.push(`~${item.estimated_minutes}m`);
+  return parts.join(" ");
 }
 
 // Builds the planner snapshot sent with each message: today, terms, courses,
-// and the verified items that matter now (recent, upcoming, overdue, undated).
+// and the verified items that matter now (overdue, recent, upcoming, undated to-dos).
 function plannerContext(today) {
   const weekday = new Date(`${today}T12:00:00`).toLocaleDateString("en-US", { weekday: "long" });
   const terms = database.listTerms();
   const courses = database.listCourses();
   const termNames = new Map(terms.map((term) => [term.id, term.name]));
-  const from = addDays(today, -14);
-  const to = addDays(today, 60);
+  const from = addDays(today, -CONTEXT_DAYS_BACK);
+  const to = addDays(today, CONTEXT_DAYS_AHEAD);
 
-  const items = database.listItems({ verified: true }).filter((item) => (
-    !item.due_date
-    || (item.due_date >= from && item.due_date <= to)
-    || (item.due_date < today && item.status !== "done")
-  )).slice(0, MAX_CONTEXT_ITEMS);
+  const relevant = database.listItems({ verified: true }).filter((item) => (
+    item.due_date
+      ? (item.due_date >= from && item.due_date <= to) || (item.due_date < today && item.status !== "done")
+      : item.status !== "done"
+  ));
+  const items = relevant.slice(0, MAX_CONTEXT_ITEMS);
+  const omitted = relevant.length - items.length;
 
   return [
-    `Today is ${weekday}, ${today}.`,
-    "Terms:",
-    ...(terms.length ? terms.map((term) => `- ${term.name}: ${term.start_date} to ${term.end_date}`) : ["- none"]),
-    "Courses (course_id: code name, term):",
+    `Today: ${weekday} ${today}.`,
+    `Terms: ${terms.length ? terms.map((term) => `${term.name} ${term.start_date}..${term.end_date}`).join("; ") : "none"}.`,
+    "Courses (course_id=code name):",
     ...(courses.length
-      ? courses.map((course) => `- ${course.id}: ${course.code} ${course.name}, ${termNames.get(course.term_id) || "?"}`)
-      : ["- none"]),
-    "Items (id | title | type | course | due | status):",
-    ...(items.length ? items.map(itemLine) : ["- none"]),
+      ? courses.map((course) => `${course.id}=${course.code} ${course.name}${terms.length > 1 ? ` [${termNames.get(course.term_id) || "?"}]` : ""}`)
+      : ["none"]),
+    `Items (#id title (type, course) due status [priority] [estimate]); only overdue, ${from}..${to}, and undated to-dos are listed. Ask if the student means an item not listed:`,
+    ...(items.length ? items.map(itemLine) : ["none"]),
+    ...(omitted > 0 ? [`(${omitted} more not shown)`] : []),
   ].join("\n");
+}
+
+// Cuts an older chat turn down before it is re-sent as history.
+function shorten(text) {
+  return text.length > HISTORY_MESSAGE_CHARS ? `${text.slice(0, HISTORY_MESSAGE_CHARS)}…` : text;
 }
 
 const FIELD_NAMES = {
@@ -136,7 +150,8 @@ async function sendMessage(content) {
   }
 
   const today = localDate();
-  const history = database.listRecentChatMessages().map(({ role, content: body }) => ({ role, content: body }));
+  const history = database.listRecentChatMessages()
+    .map(({ role, content: body }) => ({ role, content: shorten(body) }));
   const messages = [
     ...history,
     { role: "user", content: `${text}\n\n--- Planner data (for reference) ---\n${plannerContext(today)}` },
@@ -149,6 +164,8 @@ async function sendMessage(content) {
     system: SYSTEM_PROMPT,
     assistantName: "Aivana",
     messages,
+    maxTokens: REPLY_MAX_TOKENS,
+    webSearch: false,
   });
 
   const reply = blankToNull(data.reply) || "Sorry, I could not come up with an answer. Try rephrasing.";

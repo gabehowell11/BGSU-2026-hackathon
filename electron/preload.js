@@ -4,8 +4,10 @@ contextBridge.exposeInMainWorld("aivana", {
   // Sends a prompt to the main process and returns Aivana's answer (smoke test).
   generate: (prompt) => ipcRenderer.invoke("aivana:generate", prompt),
   // Reads a syllabus, schedule, or photo and returns unsaved drafts to review.
-  // options: { termId, courseId?, files?: [{ name, data }], text? }. With no
-  // files and no text, a file picker opens. Returns { canceled, files, drafts }.
+  // options: { termId, courseId?, files?: [{ name, data }], text?, force? }. With no
+  // files and no text, a file picker opens. Returns { canceled, cached, files,
+  // sentAsText, sentAsFile, drafts }. Re-uploading the same documents reuses the
+  // saved result for free; pass force: true to ask Aivana again.
   // Save confirmed drafts with database.createItems(drafts, { verified: true }).
   extract: (options) => ipcRenderer.invoke("extract:run", options),
   // Sends a chat message. Returns { reply, actions, rejected, messages }.
