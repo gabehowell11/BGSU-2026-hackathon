@@ -1,6 +1,7 @@
 import "dotenv/config";
 import Aivana from "@aivana/sdk";
 
+// Sends one short prompt to Aivana and prints the answer.
 async function main() {
   if (!process.env.AIVANA_API_KEY) {
     throw new Error("AIVANA_API_KEY is not set. Copy .env.example to .env.");

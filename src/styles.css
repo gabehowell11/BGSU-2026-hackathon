@@ -19,12 +19,13 @@ form {
   gap: 12px;
 }
 
-.assignment-form {
+.data-form {
   grid-template-columns: 100px 1fr;
   align-items: center;
+  margin-bottom: 16px;
 }
 
-.assignment-form button {
+.data-form button {
   grid-column: 2;
 }
 
@@ -70,14 +71,14 @@ section {
   background: white;
 }
 
-.assignment-list {
+.record-list {
   display: grid;
   gap: 10px;
   padding: 0;
   list-style: none;
 }
 
-.assignment-list li {
+.record-list li {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -89,4 +90,8 @@ section {
 
 .error {
   color: #9b1c1c;
+}
+
+.unverified {
+  color: #8a5a00;
 }
