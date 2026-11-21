@@ -4,11 +4,7 @@ const path = require("node:path");
 const { ipcMain, dialog, BrowserWindow } = require("electron");
 const database = require("./database");
 const aivana = require("./aivana");
-const {
-  extractionResultSchema,
-  setupExtractionResultSchema,
-  EXTRACTION_TYPES,
-} = require("../shared/schemas");
+const { EXTRACTION_TYPES } = require("../shared/schemas");
 const {
   blankToNull,
   requireDate,
@@ -27,8 +23,27 @@ const MIB = 1024 * 1024;
 const MAX_FILES = 5;
 const MAX_TOTAL_BYTES = 40 * MIB;
 const MAX_TEXT_CHARS = 400000;
-const API_PROMPT_CHARS = 12000;
 const LOW_CONFIDENCE = 0.6;
+
+// Aivana's answer has a size limit (2,048 tokens for this workspace, and asking
+// for more is refused), so a list of too many items is cut off before it ends.
+// The document is therefore sent in parts that each mention a limited number
+// of dates, and a part whose answer is still cut off is halved and read again.
+//
+// Answers are requested as plain JSON text, not with Aivana's checked
+// json_schema format. That format rejected ordinary syllabus text outright
+// (structured_output_failed), held fewer items, and took about twice as long.
+// A plain answer that is cut off still yields its complete items, and toDraft
+// cleans every field, so nothing depends on Aivana validating the answer.
+const CHUNK_MAX_CHARS = 6000;
+const CHUNK_MAX_DATES = 14;
+// Lines from the end of the previous part, sent as context so an item and its
+// date on neighbouring lines are not separated.
+const CONTEXT_LINES = 2;
+// A part shorter than this is not cut in half again.
+const MIN_SPLIT_CHARS = 200;
+// How many requests run at the same time.
+const PARALLEL_REQUESTS = 3;
 
 // File types Aivana reads directly, with its per-file size limits.
 const ATTACHMENT_TYPES = {
@@ -118,44 +133,230 @@ function compactText(text) {
     .trim();
 }
 
-// Aivana limits one workspace prompt to 20,000 characters. Split on paragraph
-// boundaries and keep every API prompt below that limit.
-function splitDocumentText(text, maxChars = API_PROMPT_CHARS) {
-  const clean = compactText(text);
-  if (!clean) return [];
-  if (clean.length <= maxChars) return [clean];
+const MONTH_NAME = "(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
+const CALENDAR_DATE = new RegExp([
+  "\\b\\d{4}-\\d{1,2}-\\d{1,2}\\b",
+  `\\b${MONTH_NAME}\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b`,
+  `\\b\\d{1,2}(?:st|nd|rd|th)?\\s+${MONTH_NAME}\\b`,
+  "\\b\\d{1,2}[/-]\\d{1,2}(?:[/-]\\d{2,4})?\\b",
+].join("|"), "gi");
+const WEEK_MENTION = /\b(?:week|module)\s*\d{1,2}\b/i;
 
-  const chunks = [];
-  let current = "";
-  for (const block of clean.split(/\n{2,}/)) {
-    const candidate = current ? `${current}\n\n${block}` : block;
-    if (candidate.length <= maxChars) {
-      current = candidate;
-      continue;
-    }
-
-    if (current) chunks.push(current);
-    if (block.length <= maxChars) {
-      current = block;
-      continue;
-    }
-
-    let start = 0;
-    while (start < block.length) {
-      let end = Math.min(start + maxChars, block.length);
-      if (end < block.length) {
-        const newline = block.lastIndexOf("\n", end);
-        if (newline > start + Math.floor(maxChars * 0.75)) end = newline;
-      }
-      chunks.push(block.slice(start, end).trim());
-      start = end;
-    }
-    current = "";
+// Estimates how many dated items a piece of text holds. A line counts once for
+// one date (or a "Week 5" style mention) and twice for more, because a schedule
+// row such as "Sep 7-11 ... Quiz 1 Fri 9/11" names several dates for one or two items.
+function countDateMentions(text) {
+  let count = 0;
+  for (const line of String(text).split("\n")) {
+    const dates = line.match(CALENDAR_DATE)?.length || 0;
+    count += Math.min(dates, 2) || (WEEK_MENTION.test(line) ? 1 : 0);
   }
-  if (current) chunks.push(current);
-  return chunks;
+  return count;
 }
 
+// Returns the last few non-empty lines of a piece of text.
+function lastLines(text, count = CONTEXT_LINES) {
+  return String(text).split("\n").filter((line) => line.trim()).slice(-count).join("\n");
+}
+
+// Splits document text into parts small enough for one Aivana answer: at most
+// maxChars characters and maxDates date mentions each. Parts break between lines.
+function splitDocumentText(text, maxChars = CHUNK_MAX_CHARS, maxDates = CHUNK_MAX_DATES) {
+  const clean = compactText(text);
+  if (!clean) return [];
+
+  // Lines are the smallest unit. A line longer than the limit is cut at a space.
+  const lines = [];
+  for (const line of clean.split("\n")) {
+    let rest = line;
+    while (rest.length > maxChars) {
+      const space = rest.lastIndexOf(" ", maxChars);
+      const cut = space > maxChars / 2 ? space : maxChars;
+      lines.push(rest.slice(0, cut));
+      rest = rest.slice(cut).trimStart();
+    }
+    lines.push(rest);
+  }
+
+  const chunks = [];
+  let current = [];
+  let chars = 0;
+  let dates = 0;
+  for (const line of lines) {
+    const lineDates = countDateMentions(line);
+    if (current.length > 0 && (chars + line.length + 1 > maxChars || dates + lineDates > maxDates)) {
+      chunks.push(current.join("\n").trim());
+      current = [];
+      chars = 0;
+      dates = 0;
+    }
+    current.push(line);
+    chars += line.length + 1;
+    dates += lineDates;
+  }
+  if (current.length > 0) chunks.push(current.join("\n").trim());
+  return chunks.filter(Boolean);
+}
+
+// Cuts text near its middle, at a line break when there is one, else at a space.
+function splitInHalf(text) {
+  const middle = Math.floor(text.length / 2);
+  let cut = text.lastIndexOf("\n", middle);
+  if (cut < text.length / 4) cut = text.indexOf("\n", middle);
+  if (cut < 0 || cut > (text.length * 3) / 4) cut = text.lastIndexOf(" ", middle);
+  if (cut <= 0) cut = middle;
+  return [text.slice(0, cut).trim(), text.slice(cut).trim()].filter(Boolean);
+}
+
+// Runs async jobs a few at a time and returns their results in the original
+// order. After one job fails, no further jobs are started.
+async function runLimited(jobs, limit) {
+  const results = new Array(jobs.length);
+  let next = 0;
+  let failed = false;
+  async function worker() {
+    while (!failed && next < jobs.length) {
+      const index = next;
+      next += 1;
+      try {
+        results[index] = await jobs[index]();
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, jobs.length) }, worker));
+  return results;
+}
+
+// Fills the empty fields of a term or course with values from a later answer,
+// so the first part that states a value wins (setup mode).
+function fillBlanks(current, next) {
+  if (!next || typeof next !== "object") return current;
+  const merged = { ...(current || {}) };
+  for (const [key, value] of Object.entries(next)) {
+    if (blankToNull(merged[key]) === null && blankToNull(value) !== null) merged[key] = value;
+  }
+  return merged;
+}
+
+// The instruction that tells Aivana to answer as plain JSON text. term and
+// course come first, so a cut-off answer still includes them.
+function plainFormat(setupMode) {
+  const item = '{"title":"...","type":"...","due_date":"YYYY-MM-DD","due_time":"HH:MM","weight_pct":0,"date_text":"...","week":0,"weekday":"...","source_quote":"...","confidence":0.9}';
+  const setup = setupMode
+    ? '"term":{"name":"...","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"},"course":{"code":"...","name":"..."},'
+    : "";
+  return [
+    `Reply with JSON only, with no markdown and no other text, shaped like {${setup}"items":[${item}]}.`,
+    `Leave out any field that does not apply. type is one of: ${EXTRACTION_TYPES.join(", ")}.`,
+    'When nothing is dated, reply {"items":[]}.',
+  ].join(" ");
+}
+
+// Returns the {...} that starts at `start`, or null when it is cut off.
+function balancedObject(text, start) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+    } else if (char === '"') {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+  return null;
+}
+
+// Parses JSON and returns null instead of throwing.
+function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+// The field names toDraft expects, keyed by the name with punctuation removed.
+const ANSWER_KEYS = {
+  title: "title",
+  type: "type",
+  duedate: "due_date",
+  duetime: "due_time",
+  weightpct: "weight_pct",
+  datetext: "date_text",
+  week: "week",
+  weekday: "weekday",
+  sourcequote: "source_quote",
+  confidence: "confidence",
+  name: "name",
+  startdate: "start_date",
+  enddate: "end_date",
+  code: "code",
+};
+
+// Restores the expected field names on one answer object. Aivana's plain
+// answers often lose the underscores ("duedate", "sourcequote"), so names are
+// matched with case and punctuation ignored. Returns null for a non-object.
+function canonicalKeys(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    result[ANSWER_KEYS[key.toLowerCase().replace(/[^a-z]/g, "")] || key] = entry;
+  }
+  return result;
+}
+
+// Reads Aivana's plain-text JSON answer. A cut-off answer still returns every
+// complete item, with cutOff set. Returns null when no JSON can be found.
+function parsePlainAnswer(text) {
+  const body = String(text || "");
+  const start = body.indexOf("{");
+  if (start < 0) return null;
+
+  const whole = balancedObject(body, start);
+  const parsed = whole ? parseJson(whole) : null;
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    return {
+      items: (Array.isArray(parsed.items) ? parsed.items : []).map(canonicalKeys).filter(Boolean),
+      term: canonicalKeys(parsed.term),
+      course: canonicalKeys(parsed.course),
+    };
+  }
+
+  const data = { items: [], term: null, course: null, cutOff: true };
+  for (const key of ["term", "course"]) {
+    const match = new RegExp(`"${key}"\\s*:\\s*\\{`).exec(body);
+    const value = match ? balancedObject(body, match.index + match[0].length - 1) : null;
+    if (value) data[key] = canonicalKeys(parseJson(value));
+  }
+  const list = /"items"\s*:\s*\[/.exec(body);
+  if (!list) return null;
+  let index = list.index + list[0].length;
+  for (;;) {
+    const open = body.indexOf("{", index);
+    const close = body.indexOf("]", index);
+    if (open < 0 || (close >= 0 && close < open)) break;
+    const value = balancedObject(body, open);
+    if (!value) break;
+    const item = canonicalKeys(parseJson(value));
+    if (item) data.items.push(item);
+    index = open + value.length;
+  }
+  return data;
+}
+
+// Drops repeated items (same title and date), which parts that overlap can produce.
 function mergeExtractedItems(items) {
   const merged = [];
   const seen = new Set();
@@ -173,16 +374,7 @@ function mergeExtractedItems(items) {
 // Cheap local date preflight. Files without a date-like value never reach
 // Aivana, which prevents a paid extraction request for unrelated documents.
 function containsLikelyDate(text) {
-  const value = String(text || "");
-  if (!value.trim()) return false;
-
-  return [
-    /\b\d{4}-\d{1,2}-\d{1,2}\b/,
-    /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?\b/i,
-    /\b\d{1,2}\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i,
-    /\b(?:\d{1,2}[/-]){1,2}\d{2,4}\b/,
-    /\b(?:week|module)\s*\d{1,2}\b.{0,40}\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|friday)\b/i,
-  ].some((pattern) => pattern.test(value));
+  return countDateMentions(text || "") > 0;
 }
 
 // Returns a PDF's text when it has a real text layer, or null for scanned or
@@ -460,27 +652,67 @@ async function runExtraction(event, options = {}) {
       `Term: ${term.name}, ${term.start_date} to ${term.end_date}.`,
       course ? `Course: ${course.code} ${course.name}.` : "Course: not specified.",
     ];
-  const documentChunks = documentText ? splitDocumentText(documentText) : [];
-  const prompts = documentChunks.map((chunk, index) => ({
-    text: [
-      ...context,
-      `Document chunk ${index + 1} of ${documentChunks.length}.`,
-      "List every dated item in this chunk. Do not invent items or dates.",
-      `\n${chunk}`,
-    ].join("\n"),
-    files: [],
+  // Problems the user should know about, such as a part that was only partly read.
+  const warnings = [];
+  const format = plainFormat(setupMode);
+
+  // Sends one request and returns the parsed answer: { items, term?, course?,
+  // cutOff? }, or null when the answer held no JSON.
+  const ask = async (prompt, promptFiles) => parsePlainAnswer(await aivana.generateText({
+    feature: "extract",
+    prompt,
+    system: SYSTEM_PROMPT,
+    temperature: 0,
+    webSearch: false,
+    attachments: promptFiles,
   }));
-  // Images and scanned pages go in one request with the files attached.
-  if (attachments.length) {
-    prompts.push({
-      text: [
-        ...context,
-        `Attached: ${attachments.map((file) => file.name).join(", ")}.`,
-        "These are photos or scanned pages. Read them carefully and list every dated item. Do not invent items or dates.",
-      ].join("\n"),
-      files: attachments.map(({ mimeType, data }) => ({ mimeType, data })),
-    });
-  }
+
+  // Reads one part of the text. `lead` is the end of the text just before it.
+  // When the answer is cut off, the part is halved and each half is read on
+  // its own, so nothing is lost; a part too short to halve keeps what arrived.
+  const readText = async (chunk, lead) => {
+    const data = await ask([
+      ...context,
+      "This is one part of the documents.",
+      "List every dated item in this part. Do not invent items or dates.",
+      format,
+      ...(lead ? [`\nThe lines just before this part, for context only. Do not list items from them:\n${lead}`] : []),
+      `\n${lead ? "This part:\n" : ""}${chunk}`,
+    ].join("\n"), []);
+    if (data && !data.cutOff) return [data];
+
+    const halves = data && chunk.length >= MIN_SPLIT_CHARS ? splitInHalf(chunk) : [];
+    if (halves.length === 2) {
+      return [...await readText(halves[0], lead), ...await readText(halves[1], lastLines(halves[0]))];
+    }
+    const opening = chunk.replace(/^--- .*? ---\s*/, "").slice(0, 50).replace(/\s+/g, " ").trim();
+    console.warn(`Aivana's answer for this text was ${data ? "cut off" : "not usable"}:\n${chunk}`);
+    warnings.push(data
+      ? `The part starting "${opening}" was only partly read, so some items may be missing.`
+      : `The part starting "${opening}" could not be read.`);
+    return [data || { items: [] }];
+  };
+
+  // Reads one image or scanned PDF. Each file gets its own request, so the
+  // items from several files never have to fit in one answer. A file cannot
+  // be halved, so a cut-off answer keeps the items that arrived.
+  const readFile = async (file) => {
+    const data = await ask([
+      ...context,
+      `Attached: ${file.name}.`,
+      "This is a photo or scanned pages. Read it carefully and list every dated item. Do not invent items or dates.",
+      format,
+    ].join("\n"), [{ mimeType: file.mimeType, data: file.data }]);
+    if (!data) warnings.push(`${file.name} could not be read.`);
+    else if (data.cutOff) warnings.push(`${file.name} was only partly read, so some items may be missing. A text-based PDF reads fully.`);
+    return [data || { items: [] }];
+  };
+
+  const chunks = documentText ? splitDocumentText(documentText) : [];
+  const jobs = [
+    ...chunks.map((chunk, index) => () => readText(chunk, index > 0 ? lastLines(chunks[index - 1]) : "")),
+    ...attachments.map((file) => () => readFile(file)),
+  ];
 
   const cacheKey = extractionCacheKey(
     `${setupMode ? "setup" : "normal"}\n${context.join("\n")}\n${documentText}`,
@@ -494,23 +726,12 @@ async function runExtraction(event, options = {}) {
     let suggestedTerm = null;
     let suggestedCourse = null;
 
-    for (const { text: prompt, files: promptFiles } of prompts) {
-      if (prompt.length > 20000) {
-        throw new Error("Document text could not be split small enough for Aivana.");
-      }
-      const { data } = await aivana.generateStructured({
-        feature: "extract",
-        prompt,
-        schema: setupMode ? setupExtractionResultSchema : extractionResultSchema,
-        system: SYSTEM_PROMPT,
-        temperature: 0,
-        webSearch: false,
-        attachments: promptFiles,
-      });
+    const answers = (await runLimited(jobs, PARALLEL_REQUESTS)).flat();
+    for (const data of answers) {
       extractedItems.push(...(Array.isArray(data.items) ? data.items : []));
       if (setupMode) {
-        suggestedTerm ||= data.term ?? null;
-        suggestedCourse ||= data.course ?? null;
+        suggestedTerm = fillBlanks(suggestedTerm, data.term);
+        suggestedCourse = fillBlanks(suggestedCourse, data.course);
       }
     }
 
@@ -519,7 +740,8 @@ async function runExtraction(event, options = {}) {
       term: suggestedTerm,
       course: suggestedCourse,
     };
-    database.saveCachedExtraction(cacheKey, result);
+    // An incomplete result is not saved, so the next upload asks Aivana again.
+    if (warnings.length === 0) database.saveCachedExtraction(cacheKey, result);
   }
 
   const suggestedTerm = setupMode ? toSuggestedTerm(result.term) : null;
@@ -575,6 +797,8 @@ async function runExtraction(event, options = {}) {
     suggestedTerm,
     suggestedCourse,
     drafts,
+    // Messages to show the user when part of a document could not be fully read.
+    warnings,
   };
 }
 
